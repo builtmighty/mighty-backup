@@ -135,17 +135,3 @@ function bm_backup_init() {
     }
 }
 add_action( 'plugins_loaded', 'bm_backup_init' );
-
-/**
- * Plugin Updates. 
- * 
- * @since   1.0.0
- */
-require KIT_PATH . 'updates/plugin-update-checker.php';
-use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
-$updates = PucFactory::buildUpdateChecker(
-	'https://github.com/builtmighty/builtmighty-site-backup',
-	__FILE__,
-	'builtmighty-site-backup'
-);
-$updates->setBranch( 'main' );

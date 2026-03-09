@@ -47,7 +47,7 @@ class BM_Backup_File_Archiver {
         if ( $this->can_use_shell_tar() ) {
             $this->archive_with_tar( $output_path, $wp_root, $exclusions );
         } else {
-            $this->archive_with_phardata( $output_path, $wp_root, $exclusions );
+            $this->archive_with_streaming_gzip( $output_path, $wp_root, $exclusions );
         }
 
         $size = filesize( $output_path );
@@ -101,63 +101,142 @@ class BM_Backup_File_Archiver {
     }
 
     /**
-     * Create archive using PHP PharData (fallback for hosts without exec).
+     * Create archive using streaming gzip (single-pass, no intermediate .tar on disk).
+     *
+     * Writes ustar tar headers and file contents directly into a gzip stream,
+     * eliminating the two-pass disk I/O that PharData requires.
      */
-    private function archive_with_phardata( string $output_path, string $wp_root, array $exclusions ): void {
-        // PharData needs a .tar path first, then we compress.
-        $tar_path = preg_replace( '/\.gz$/', '', $output_path );
-        if ( $tar_path === $output_path ) {
-            $tar_path = $output_path . '.tar';
-        }
-
-        // Remove existing files to avoid PharData errors.
-        if ( file_exists( $tar_path ) ) {
-            unlink( $tar_path );
-        }
+    private function archive_with_streaming_gzip( string $output_path, string $wp_root, array $exclusions ): void {
         if ( file_exists( $output_path ) ) {
             unlink( $output_path );
         }
 
-        $phar = new PharData( $tar_path );
-
-        $iterator = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator(
-                $wp_root,
-                RecursiveDirectoryIterator::SKIP_DOTS | RecursiveDirectoryIterator::FOLLOW_SYMLINKS
-            ),
-            RecursiveIteratorIterator::SELF_FIRST
-        );
-
-        foreach ( $iterator as $file ) {
-            $real_path     = $file->getRealPath();
-            $relative_path = ltrim( str_replace( $wp_root, '', $real_path ), '/' );
-
-            if ( $this->is_excluded( $relative_path, $exclusions ) ) {
-                continue;
-            }
-
-            if ( $file->isDir() ) {
-                $phar->addEmptyDir( $relative_path );
-            } elseif ( $file->isFile() && $file->isReadable() ) {
-                $phar->addFile( $real_path, $relative_path );
-            }
+        $gz = gzopen( $output_path, 'wb6' );
+        if ( ! $gz ) {
+            throw new \Exception( "Failed to open output file for writing: {$output_path}" );
         }
 
-        // Compress to .tar.gz.
-        $phar->compress( Phar::GZ );
+        try {
+            $dir_iterator = new RecursiveDirectoryIterator(
+                $wp_root,
+                RecursiveDirectoryIterator::SKIP_DOTS | RecursiveDirectoryIterator::FOLLOW_SYMLINKS
+            );
 
-        // Clean up the uncompressed .tar.
-        if ( file_exists( $tar_path ) ) {
-            unlink( $tar_path );
+            $filter = new RecursiveCallbackFilterIterator(
+                $dir_iterator,
+                function ( $file ) use ( $wp_root, $exclusions ) {
+                    $real_path     = $file->getRealPath();
+                    $relative_path = ltrim( str_replace( $wp_root, '', $real_path ), '/' );
+                    return ! $this->is_excluded( $relative_path, $exclusions );
+                }
+            );
+
+            $iterator = new RecursiveIteratorIterator( $filter, RecursiveIteratorIterator::SELF_FIRST );
+
+            foreach ( $iterator as $file ) {
+                $real_path     = $file->getRealPath();
+                $relative_path = ltrim( str_replace( $wp_root, '', $real_path ), '/' );
+
+                if ( $file->isDir() ) {
+                    // Directory entry: trailing slash, zero size, typeflag '5'.
+                    gzwrite( $gz, $this->build_tar_header( $relative_path . '/', 0, $file->getMTime(), $file->getPerms(), '5' ) );
+
+                } elseif ( $file->isFile() && $file->isReadable() ) {
+                    $size = $file->getSize();
+                    gzwrite( $gz, $this->build_tar_header( $relative_path, $size, $file->getMTime(), $file->getPerms(), '0' ) );
+
+                    // Stream file contents in 64 KB chunks directly into gzip.
+                    $fh = fopen( $real_path, 'rb' );
+                    if ( $fh ) {
+                        while ( ! feof( $fh ) ) {
+                            $chunk = fread( $fh, 65536 );
+                            if ( $chunk !== false ) {
+                                gzwrite( $gz, $chunk );
+                            }
+                        }
+                        fclose( $fh );
+                    }
+
+                    // Pad data region to the next 512-byte boundary.
+                    $padding = ( 512 - ( $size % 512 ) ) % 512;
+                    if ( $padding > 0 ) {
+                        gzwrite( $gz, str_repeat( "\0", $padding ) );
+                    }
+                }
+            }
+
+            // End-of-archive: two consecutive 512-byte zero blocks.
+            gzwrite( $gz, str_repeat( "\0", 1024 ) );
+
+        } finally {
+            gzclose( $gz );
         }
     }
 
     /**
+     * Build a 512-byte ustar tar header block.
+     *
+     * For paths longer than 100 characters, splits at a directory boundary into
+     * the ustar prefix field (max 155 chars) and name field (max 100 chars),
+     * supporting paths up to 255 characters total.
+     */
+    private function build_tar_header( string $path, int $size, int $mtime, int $mode, string $typeflag ): string {
+        $name   = $path;
+        $prefix = '';
+
+        if ( strlen( $name ) > 100 ) {
+            $slash = strrpos( substr( $name, 0, 155 ), '/' );
+            if ( $slash !== false && strlen( $name ) - $slash - 1 <= 100 ) {
+                $prefix = substr( $name, 0, $slash );
+                $name   = substr( $name, $slash + 1 );
+            }
+        }
+
+        // Assemble the 512-byte header with a placeholder checksum (8 spaces).
+        $header = pack( 'a100', $name )                              // name       (100)
+                . pack( 'a8',   sprintf( '%07o', $mode & 0777 ) . "\0" ) // mode    (8)
+                . pack( 'a8',   "0000000\0" )                        // uid        (8)
+                . pack( 'a8',   "0000000\0" )                        // gid        (8)
+                . pack( 'a12',  sprintf( '%011o', $size ) . "\0" )   // size       (12)
+                . pack( 'a12',  sprintf( '%011o', $mtime ) . "\0" )  // mtime      (12)
+                . '        '                                          // checksum   (8) — placeholder
+                . $typeflag                                           // typeflag   (1)
+                . str_repeat( "\0", 100 )                            // linkname   (100)
+                . "ustar\000"                                         // magic      (6)
+                . "00"                                                // version    (2)
+                . str_repeat( "\0", 32 )                             // uname      (32)
+                . str_repeat( "\0", 32 )                             // gname      (32)
+                . str_repeat( "\0", 8 )                              // devmajor   (8)
+                . str_repeat( "\0", 8 )                              // devminor   (8)
+                . pack( 'a155', $prefix )                            // prefix     (155)
+                . str_repeat( "\0", 12 );                            // padding    (12)
+        // = 512 bytes total
+
+        // Compute checksum: sum of all byte values (placeholder spaces count as 0x20 each).
+        $checksum = array_sum( array_map( 'ord', str_split( $header ) ) );
+
+        // Write checksum as 6 octal digits + null + space (standard ustar format).
+        return substr_replace( $header, sprintf( '%06o', $checksum ) . "\0 ", 148, 8 );
+    }
+
+    /**
      * Check if a relative path matches any exclusion pattern.
+     *
+     * Patterns are matched as a path prefix (e.g. "wp-content/uploads") OR as
+     * a path segment anywhere in the path (e.g. "node_modules" matches
+     * "wp-content/themes/builtmighty/node_modules/...").
      */
     private function is_excluded( string $relative_path, array $exclusions ): bool {
         foreach ( $exclusions as $pattern ) {
+            // Direct prefix match (e.g. "wp-content/uploads/foo.jpg").
             if ( str_starts_with( $relative_path, $pattern ) ) {
+                return true;
+            }
+            // Nested segment match (e.g. "node_modules" inside any subdirectory).
+            if (
+                str_contains( $relative_path, '/' . $pattern . '/' ) ||
+                str_ends_with( $relative_path, '/' . $pattern )
+            ) {
                 return true;
             }
         }

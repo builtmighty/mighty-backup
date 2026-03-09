@@ -5,6 +5,7 @@
  * Usage:
  *   wp bm-backup run [--type=<type>] [--async]
  *   wp bm-backup status
+ *   wp bm-backup cancel
  *   wp bm-backup list [--type=<type>]
  *   wp bm-backup prune
  *   wp bm-backup test
@@ -150,6 +151,33 @@ class BM_Backup_CLI_Command {
             WP_CLI::log( sprintf( "\nNext scheduled: %s UTC", gmdate( 'Y-m-d H:i:s', $next ) ) );
         } else {
             WP_CLI::log( "\nNo backup scheduled." );
+        }
+    }
+
+    /**
+     * Cancel a running or pending backup.
+     *
+     * Removes queued backup actions, deletes temporary files, and marks
+     * the backup log entry as failed.
+     *
+     * ## EXAMPLES
+     *
+     *     wp bm-backup cancel
+     */
+    public function cancel( $args, $assoc_args ) {
+        $manager = new BM_Backup_Manager();
+
+        if ( ! $manager->get_state() ) {
+            WP_CLI::warning( 'No backup is currently running or pending.' );
+            return;
+        }
+
+        $cancelled = $manager->cancel();
+
+        if ( $cancelled ) {
+            WP_CLI::success( 'Backup cancelled. Temporary files deleted and scheduled actions removed.' );
+        } else {
+            WP_CLI::warning( 'No active backup to cancel.' );
         }
     }
 

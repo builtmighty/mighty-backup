@@ -423,6 +423,43 @@ class BM_Backup_Manager {
     }
 
     /**
+     * Cancel a running or pending backup.
+     *
+     * Unschedules all pending Action Scheduler actions for the backup, deletes
+     * temp files, marks the log entry as failed, and clears state.
+     *
+     * @return bool False if no backup was in progress.
+     */
+    public function cancel(): bool {
+        $state = $this->get_state();
+        if ( ! $state || ! in_array( $state['status'], [ 'pending', 'running' ], true ) ) {
+            return false;
+        }
+
+        // Unschedule any queued backup step actions.
+        foreach ( self::STEPS as $step ) {
+            as_unschedule_all_actions( "bm_backup_step_{$step}", [], self::ACTION_GROUP );
+        }
+
+        // Delete temp files.
+        foreach ( [ $state['db_local_path'], $state['files_local_path'] ] as $path ) {
+            if ( $path && file_exists( $path ) ) {
+                unlink( $path );
+            }
+        }
+
+        // Mark log entry as failed.
+        if ( $state['log_id'] ) {
+            $logger = new BM_Backup_Logger();
+            $logger->fail( $state['log_id'], 'Cancelled via WP-CLI.' );
+        }
+
+        $this->clear_state();
+
+        return true;
+    }
+
+    /**
      * Clear the backup state (after viewing results or for reset).
      */
     public function clear_state(): void {

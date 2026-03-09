@@ -227,14 +227,12 @@ class BM_Backup_Database_Exporter {
      * Build the VALUES string for a single row.
      */
     private function build_values_string( array $row ): string {
-        global $wpdb;
-
         $values = [];
         foreach ( $row as $value ) {
             if ( is_null( $value ) ) {
                 $values[] = 'NULL';
             } else {
-                $values[] = $wpdb->prepare( '%s', $value );
+                $values[] = "'" . esc_sql( $value ) . "'";
             }
         }
 
