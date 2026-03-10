@@ -3,6 +3,7 @@ name: Build Release ZIP
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -24,7 +25,18 @@ jobs:
           rsync -a --exclude="$PLUGIN_DIR" --exclude='.git' --exclude='.github' --exclude='node_modules' --exclude='.gitignore' . "$PLUGIN_DIR/"
           zip -r builtmighty-site-backup.zip "$PLUGIN_DIR"
 
+      - name: Get latest release tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$(gh release list --limit 1 --json tagName -q '.[0].tagName')" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload ZIP to release
-        run: gh release upload "${{ github.event.release.tag_name }}" builtmighty-site-backup.zip --clobber
+        run: gh release upload "${{ steps.tag.outputs.tag }}" builtmighty-site-backup.zip --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
