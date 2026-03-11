@@ -111,7 +111,8 @@ class BM_Backup_File_Archiver {
             unlink( $output_path );
         }
 
-        $gz = gzopen( $output_path, 'wb6' );
+        $gzip_level = max( 1, min( 9, (int) apply_filters( 'bm_backup_files_gzip_level', 6 ) ) );
+        $gz = gzopen( $output_path, 'wb' . $gzip_level );
         if ( ! $gz ) {
             throw new \Exception( "Failed to open output file for writing: {$output_path}" );
         }

@@ -123,7 +123,7 @@ $recent    = $logger->get_recent( 20 );
                     <button type="button" id="bm-test-connection" class="button button-secondary">
                         <?php esc_html_e( 'Test Connection', 'builtmighty-site-backup' ); ?>
                     </button>
-                    <span id="bm-test-result" class="bm-result-message"></span>
+                    <span id="bm-test-result" class="bm-result-message" aria-live="polite"></span>
                 </td>
             </tr>
         </table>
@@ -276,7 +276,10 @@ $recent    = $logger->get_recent( 20 );
         <button type="button" id="bm-run-backup" class="button button-primary">
             <?php esc_html_e( 'Run Backup Now', 'builtmighty-site-backup' ); ?>
         </button>
-        <span id="bm-backup-result" class="bm-result-message"></span>
+        <button type="button" id="bm-cancel-backup" class="button" style="display:none;">
+            <?php esc_html_e( 'Cancel Backup', 'builtmighty-site-backup' ); ?>
+        </button>
+        <span id="bm-backup-result" class="bm-result-message" aria-live="polite"></span>
     </p>
 
     <!-- Backup History -->
@@ -302,7 +305,7 @@ $recent    = $logger->get_recent( 20 );
                         <td><?php echo esc_html( $entry['backup_type'] ); ?></td>
                         <td><?php echo esc_html( $entry['trigger_type'] ); ?></td>
                         <td>
-                            <span class="bm-status bm-status-<?php echo esc_attr( $entry['status'] ); ?>">
+                            <span class="bm-status bm-status-<?php echo esc_attr( $entry['status'] ); ?>" role="status">
                                 <?php echo esc_html( ucfirst( $entry['status'] ) ); ?>
                             </span>
                         </td>

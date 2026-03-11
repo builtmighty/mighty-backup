@@ -25,6 +25,7 @@ class BM_Backup_Settings {
         add_action( 'wp_ajax_bm_backup_run_now', [ $this, 'ajax_run_now' ] );
         add_action( 'wp_ajax_bm_backup_check_status', [ $this, 'ajax_check_status' ] );
         add_action( 'wp_ajax_bm_backup_dismiss_status', [ $this, 'ajax_dismiss_status' ] );
+        add_action( 'wp_ajax_bm_backup_cancel', [ $this, 'ajax_cancel' ] );
         add_action( 'wp_ajax_bm_backup_generate_api_key', [ $this, 'ajax_generate_api_key' ] );
         add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
 
@@ -312,6 +313,24 @@ class BM_Backup_Settings {
         $manager = new BM_Backup_Manager();
         $manager->clear_state();
         wp_send_json_success();
+    }
+
+    /**
+     * AJAX: Cancel a running or pending backup.
+     */
+    public function ajax_cancel(): void {
+        check_ajax_referer( 'bm_backup_nonce', 'nonce' );
+
+        if ( ! current_user_can( is_multisite() ? 'manage_network_options' : 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        $manager = new BM_Backup_Manager();
+        if ( $manager->cancel() ) {
+            wp_send_json_success( [ 'message' => 'Backup cancelled.' ] );
+        } else {
+            wp_send_json_error( 'No active backup to cancel.' );
+        }
     }
 
     /**

@@ -31,6 +31,39 @@
         });
     });
 
+    // Cancel Backup button.
+    $('#bm-cancel-backup').on('click', function () {
+        var $btn = $(this);
+
+        if (!confirm('Cancel the running backup?')) {
+            return;
+        }
+
+        $btn.prop('disabled', true);
+
+        $.post(bmBackup.ajaxUrl, {
+            action: 'bm_backup_cancel',
+            nonce: bmBackup.nonce,
+        })
+        .done(function (response) {
+            stopPolling();
+            hideProgress();
+            $btn.hide();
+            $('#bm-run-backup').removeClass('running').prop('disabled', false);
+            if (response.success) {
+                showResult('success', response.data.message || 'Backup cancelled.');
+            } else {
+                showResult('error', response.data || 'Could not cancel backup.');
+            }
+        })
+        .fail(function () {
+            showResult('error', 'Cancel request failed.');
+        })
+        .always(function () {
+            $btn.prop('disabled', false);
+        });
+    });
+
     // Run Backup Now button — schedules and starts polling.
     $('#bm-run-backup').on('click', function () {
         var $btn = $(this);
@@ -90,6 +123,7 @@
 
             if (!s.active) {
                 stopPolling();
+                $('#bm-cancel-backup').hide().prop('disabled', false);
 
                 if (s.status === 'completed') {
                     hideProgress();
@@ -114,7 +148,8 @@
                 return;
             }
 
-            // Still active — update the progress bar.
+            // Still active — show cancel button and update the progress bar.
+            $('#bm-cancel-backup').show();
             showProgress(s.message || 'Running...', s.progress || 0);
         });
     }
@@ -133,10 +168,12 @@
         if (!$box.length) {
             $('#bm-run-backup').after(
                 '<div id="bm-progress-box" class="bm-progress-box">' +
-                '  <div class="bm-progress-bar-wrap">' +
+                '  <div class="bm-progress-bar-wrap"' +
+                '       role="progressbar" aria-label="Backup progress"' +
+                '       aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">' +
                 '    <div class="bm-progress-bar"></div>' +
                 '  </div>' +
-                '  <span class="bm-progress-text"></span>' +
+                '  <span class="bm-progress-text" aria-live="polite"></span>' +
                 '</div>'
             );
             $box = $('#bm-progress-box');
@@ -145,11 +182,15 @@
         $box.find('.bm-progress-text').text(text);
         if (typeof percent === 'number' && percent > 0) {
             $box.find('.bm-progress-bar').css('width', percent + '%');
+            $box.find('.bm-progress-bar-wrap').attr('aria-valuenow', percent);
         }
     }
 
     function hideProgress() {
-        $('#bm-progress-box').hide();
+        var $box = $('#bm-progress-box');
+        $box.hide();
+        $box.find('.bm-progress-bar-wrap').attr('aria-valuenow', 0);
+        $box.find('.bm-progress-bar').css('width', '0');
     }
 
     function showResult(type, message) {
@@ -235,6 +276,7 @@
         }).done(function (response) {
             if (response.success && response.data.active) {
                 $('#bm-run-backup').addClass('running').prop('disabled', true);
+                $('#bm-cancel-backup').show();
                 showProgress(response.data.message, response.data.progress);
                 startPolling();
             }

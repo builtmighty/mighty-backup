@@ -9,6 +9,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 use Aws\S3\S3Client;
 use Aws\S3\MultipartUploader;
+use Aws\Exception\AwsException;
 use Aws\Exception\MultipartUploadException;
 
 class BM_Backup_Spaces_Client {
@@ -40,11 +41,17 @@ class BM_Backup_Spaces_Client {
      * @throws \Exception On connection failure.
      */
     public function test_connection(): string {
-        $result = $this->client->listObjectsV2( [
-            'Bucket'  => $this->bucket,
-            'Prefix'  => $this->client_path . '/',
-            'MaxKeys' => 1,
-        ] );
+        try {
+            $result = $this->client->listObjectsV2( [
+                'Bucket'  => $this->bucket,
+                'Prefix'  => $this->client_path . '/',
+                'MaxKeys' => 1,
+            ] );
+        } catch ( AwsException $e ) {
+            throw new \Exception(
+                sprintf( 'Connection failed [%s]: %s', $e->getAwsErrorCode(), $e->getAwsErrorMessage() )
+            );
+        }
 
         $count = $result['KeyCount'] ?? 0;
         return sprintf(
@@ -65,13 +72,15 @@ class BM_Backup_Spaces_Client {
      */
     public function upload( string $local_path, string $remote_key ): string {
         $full_key    = $this->client_path . '/' . ltrim( $remote_key, '/' );
-        $max_retries = 3;
+        $max_retries = (int) apply_filters( 'bm_backup_upload_max_retries', 3 );
+        $part_size   = (int) apply_filters( 'bm_backup_upload_part_size', 10 * 1024 * 1024 );
+        $concurrency = (int) apply_filters( 'bm_backup_upload_concurrency', 5 );
 
         $uploader = new MultipartUploader( $this->client, $local_path, [
-            'bucket'      => $this->bucket,
-            'key'         => $full_key,
-            'part_size'   => 10 * 1024 * 1024, // 10 MB
-            'concurrency' => 5,
+            'bucket'        => $this->bucket,
+            'key'           => $full_key,
+            'part_size'     => $part_size,
+            'concurrency'   => $concurrency,
             'before_upload' => function () {
                 gc_collect_cycles();
             },

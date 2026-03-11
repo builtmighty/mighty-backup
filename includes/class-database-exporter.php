@@ -9,8 +9,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class BM_Backup_Database_Exporter {
 
-    private int $batch_size = 1000;
+    private int $batch_size;
     private int $insert_batch = 100;
+
+    public function __construct() {
+        $this->batch_size = (int) apply_filters( 'bm_backup_db_batch_size', 1000 );
+    }
 
     /**
      * Export the entire database to a gzipped SQL file.
@@ -52,26 +56,18 @@ class BM_Backup_Database_Exporter {
      * Export using mysqldump piped to gzip (fast, low memory).
      */
     private function export_with_mysqldump( string $output_path ): int {
-        $command = sprintf(
-            'mysqldump --single-transaction --quick --skip-lock-tables --set-charset '
-            . '--default-character-set=utf8mb4 --no-tablespaces '
-            . '-h %s -u %s %s %s 2>&1 | gzip -6 > %s',
-            escapeshellarg( DB_HOST ),
-            escapeshellarg( DB_USER ),
-            ! empty( DB_PASSWORD ) ? '-p' . escapeshellarg( DB_PASSWORD ) : '',
-            escapeshellarg( DB_NAME ),
-            escapeshellarg( $output_path )
-        );
+        $gzip_level = max( 1, min( 9, (int) apply_filters( 'bm_backup_db_gzip_level', 6 ) ) );
 
         // Use MYSQL_PWD env var instead of -p to avoid "password on command line" warning.
         $env_command = sprintf(
             'MYSQL_PWD=%s mysqldump --single-transaction --quick --skip-lock-tables --set-charset '
             . '--default-character-set=utf8mb4 --no-tablespaces '
-            . '-h %s -u %s %s 2>&1 | gzip -6 > %s',
+            . '-h %s -u %s %s 2>&1 | gzip -%d > %s',
             escapeshellarg( DB_PASSWORD ),
             escapeshellarg( DB_HOST ),
             escapeshellarg( DB_USER ),
             escapeshellarg( DB_NAME ),
+            $gzip_level,
             escapeshellarg( $output_path )
         );
 
@@ -101,7 +97,8 @@ class BM_Backup_Database_Exporter {
             throw new \Exception( 'The zlib PHP extension is required for database export.' );
         }
 
-        $gz = gzopen( $output_path, 'wb6' );
+        $gzip_level = max( 1, min( 9, (int) apply_filters( 'bm_backup_db_gzip_level', 6 ) ) );
+        $gz = gzopen( $output_path, 'wb' . $gzip_level );
         if ( ! $gz ) {
             throw new \Exception( "Failed to open output file: {$output_path}" );
         }

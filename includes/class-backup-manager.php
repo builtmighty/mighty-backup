@@ -127,12 +127,16 @@ class BM_Backup_Manager {
 
         $this->set_time_limit();
 
+        do_action( 'bm_backup_before_start', $state );
+
         $logger = new BM_Backup_Logger();
         $log_id = $logger->start( $state['type'], $state['trigger'] );
 
         $state['log_id'] = $log_id;
         $state['status'] = 'running';
         $this->save_state( $state );
+
+        do_action( 'bm_backup_after_start', $state );
 
         $this->advance( $state );
     }
@@ -149,12 +153,17 @@ class BM_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'export_db' );
 
+        do_action( 'bm_backup_before_export_db', $state );
+
         try {
             $exporter = new BM_Backup_Database_Exporter();
             $size     = $exporter->export( $state['db_local_path'] );
 
             $state['db_file_size'] = $size;
             $this->save_state( $state );
+
+            do_action( 'bm_backup_after_export_db', $state, $state['db_local_path'] );
+
             $this->advance( $state );
 
         } catch ( \Exception $e ) {
@@ -174,6 +183,8 @@ class BM_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'archive_files' );
 
+        do_action( 'bm_backup_before_archive_files', $state );
+
         try {
             $settings = new BM_Backup_Settings();
             $archiver = new BM_Backup_File_Archiver( $settings );
@@ -181,6 +192,9 @@ class BM_Backup_Manager {
 
             $state['files_file_size'] = $size;
             $this->save_state( $state );
+
+            do_action( 'bm_backup_after_archive_files', $state, $state['files_local_path'] );
+
             $this->advance( $state );
 
         } catch ( \Exception $e ) {
@@ -200,6 +214,8 @@ class BM_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'upload_db' );
 
+        do_action( 'bm_backup_before_upload', $state, 'db' );
+
         try {
             $settings = new BM_Backup_Settings();
             $client   = new BM_Backup_Spaces_Client( $settings );
@@ -211,6 +227,9 @@ class BM_Backup_Manager {
 
             $state['db_remote_key'] = $remote_key;
             $this->save_state( $state );
+
+            do_action( 'bm_backup_after_upload', $state, 'db', $remote_key );
+
             $this->advance( $state );
 
         } catch ( \Exception $e ) {
@@ -230,6 +249,8 @@ class BM_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'upload_files' );
 
+        do_action( 'bm_backup_before_upload', $state, 'files' );
+
         try {
             $settings = new BM_Backup_Settings();
             $client   = new BM_Backup_Spaces_Client( $settings );
@@ -241,6 +262,9 @@ class BM_Backup_Manager {
 
             $state['files_remote_key'] = $remote_key;
             $this->save_state( $state );
+
+            do_action( 'bm_backup_after_upload', $state, 'files', $remote_key );
+
             $this->advance( $state );
 
         } catch ( \Exception $e ) {
@@ -293,6 +317,8 @@ class BM_Backup_Manager {
         $state['status']       = 'completed';
         $state['current_step'] = null;
         $this->save_state( $state );
+
+        do_action( 'bm_backup_completed', $state );
     }
 
     /**
@@ -323,6 +349,8 @@ class BM_Backup_Manager {
         $state['status'] = 'failed';
         $state['error']  = $error;
         $this->save_state( $state );
+
+        do_action( 'bm_backup_failed', $state, $error );
 
         // Update log entry.
         if ( $state['log_id'] ) {
@@ -451,7 +479,7 @@ class BM_Backup_Manager {
         // Mark log entry as failed.
         if ( $state['log_id'] ) {
             $logger = new BM_Backup_Logger();
-            $logger->fail( $state['log_id'], 'Cancelled via WP-CLI.' );
+            $logger->fail( $state['log_id'], 'Cancelled.' );
         }
 
         $this->clear_state();
