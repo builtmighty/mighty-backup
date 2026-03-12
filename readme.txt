@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups, builtmighty
 Requires at least: 6.0
 Tested up to: 10
-Stable tag: 1.3.0
+Stable tag: 1.5.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,11 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 1.5.0 =
+* Renamed "Client Path" field to "GitHub Repository" — accepts full GitHub URLs, extracts repo slug automatically
+* API endpoint now returns `repository` key instead of `client_path`
+* Updated version to 1.5.0
 
 = 1.3.0 =
 * Added cancel-in-progress backup button in admin UI

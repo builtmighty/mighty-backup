@@ -98,7 +98,7 @@ class BM_Backup_Api_Endpoint {
 			'do_spaces_secret'   => $settings->get_secret_key(),
 			'do_spaces_endpoint' => $all['spaces_endpoint'] ?? '',
 			'do_spaces_bucket'   => $all['spaces_bucket'] ?? '',
-			'client_path'        => $all['client_path'] ?? '',
+			'repository'         => $all['client_path'] ?? '',
 			'hosting_provider'   => $all['hosting_provider'] ?? '',
 			'remote_domain'      => wp_parse_url( get_site_url(), PHP_URL_HOST ),
 			'platform'           => 'wordpress',

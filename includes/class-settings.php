@@ -164,7 +164,7 @@ class BM_Backup_Settings {
         }
         $sanitized['spaces_endpoint']   = sanitize_text_field( $input['spaces_endpoint'] ?? '' );
         $sanitized['spaces_bucket']     = sanitize_text_field( $input['spaces_bucket'] ?? '' );
-        $sanitized['client_path']       = sanitize_text_field( $input['client_path'] ?? '' );
+        $sanitized['client_path']       = $this->extract_repo_slug( sanitize_text_field( $input['client_path'] ?? '' ) );
 
         // Secret key — encrypt before storing. If field is empty, keep the old value.
         $raw_secret = $input['spaces_secret_key'] ?? '';
@@ -245,6 +245,31 @@ class BM_Backup_Settings {
             return '';
         }
         return $this->decrypt( $encrypted );
+    }
+
+    /**
+     * Extract the repository slug from a GitHub URL or plain slug.
+     *
+     * Accepts formats like:
+     *   https://github.com/builtmighty/protec
+     *   https://github.com/builtmighty/protec.git
+     *   github.com/builtmighty/protec
+     *   protec
+     */
+    private function extract_repo_slug( string $value ): string {
+        $value = trim( $value );
+        if ( str_contains( $value, 'github.com/' ) ) {
+            $path = wp_parse_url( $value, PHP_URL_PATH );
+            if ( empty( $path ) ) {
+                // Fallback: parse as URL with scheme.
+                $path = wp_parse_url( 'https://' . $value, PHP_URL_PATH );
+            }
+            $segments = array_filter( explode( '/', trim( $path ?? '', '/' ) ) );
+            $slug     = end( $segments );
+            $slug = $slug ?: $value;
+            return str_ends_with( $slug, '.git' ) ? substr( $slug, 0, -4 ) : $slug;
+        }
+        return str_ends_with( $value, '.git' ) ? substr( $value, 0, -4 ) : $value;
     }
 
     /**

@@ -1,3 +1,16 @@
+/* Tab panels */
+.bm-tab-panel {
+    display: none;
+}
+
+.bm-tab-panel.active {
+    display: block;
+}
+
+.bm-backup-wrap .nav-tab-wrapper {
+    margin-bottom: 20px;
+}
+
 .bm-backup-wrap h2 {
     margin-top: 2em;
 }
@@ -6,6 +19,7 @@
     margin-top: 0;
 }
 
+/* Result messages */
 .bm-result-message {
     margin-left: 10px;
     font-weight: 600;
@@ -23,6 +37,7 @@
     color: #666;
 }
 
+/* Status badges */
 .bm-status {
     display: inline-block;
     padding: 2px 8px;
@@ -47,14 +62,68 @@
     color: #721c24;
 }
 
+.bm-status-cancelled {
+    background: #e2e3e5;
+    color: #383d41;
+}
+
+/* Error cell — expandable */
 .bm-error-cell {
     max-width: 300px;
     word-wrap: break-word;
 }
 
+.bm-error-full {
+    display: none;
+}
+
+.bm-error-cell.expanded .bm-error-full {
+    display: inline;
+}
+
+.bm-error-cell.expanded .bm-error-short {
+    display: none;
+}
+
+.bm-error-toggle {
+    color: #0073aa;
+    cursor: pointer;
+    font-size: 12px;
+    margin-left: 4px;
+    text-decoration: underline;
+}
+
+/* Running button */
 #bm-run-backup.running {
     opacity: 0.7;
     pointer-events: none;
+}
+
+/* Step indicators */
+.bm-steps {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.bm-step {
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 3px;
+    background: #e0e0e0;
+    color: #666;
+    white-space: nowrap;
+}
+
+.bm-step-active {
+    background: #0073aa;
+    color: #fff;
+}
+
+.bm-step-done {
+    background: #d4edda;
+    color: #155724;
 }
 
 /* Progress bar */
@@ -86,6 +155,73 @@
     font-style: italic;
 }
 
+/* Show/hide password toggle */
+.bm-toggle-password {
+    margin-left: 4px;
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 13px;
+    color: #0073aa;
+    background: none;
+    border: none;
+    padding: 0;
+}
+
+.bm-toggle-password:hover {
+    color: #005177;
+}
+
+/* Inline validation */
+.bm-field-error {
+    color: #d63638;
+    font-size: 12px;
+    display: block;
+    margin-top: 4px;
+}
+
+/* Confirmation modal */
+.bm-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 100000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.bm-modal-content {
+    background: #fff;
+    padding: 24px;
+    border-radius: 6px;
+    max-width: 440px;
+    width: 90%;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.bm-modal-content p {
+    font-size: 14px;
+    margin: 0 0 16px;
+    line-height: 1.5;
+}
+
+.bm-modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+/* Save button loading state */
+.bm-saving {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* Day-of-week smooth toggle */
+.bm-hidden {
+    display: none;
+}
+
 /* Bootstrap key section */
 .bm-bootstrap-key-wrap {
     display: flex;
@@ -107,4 +243,34 @@
 
 .bm-key-warning {
     color: #856404;
+}
+
+/* Responsive */
+@media (max-width: 782px) {
+    .bm-progress-box {
+        max-width: 100%;
+    }
+
+    .bm-bootstrap-key-wrap {
+        flex-direction: column;
+        max-width: 100%;
+    }
+
+    .bm-bootstrap-key-input {
+        width: 100%;
+    }
+
+    .bm-steps {
+        flex-direction: column;
+    }
+
+    .bm-modal-content {
+        margin: 16px;
+    }
+
+    .bm-backup-wrap .widefat td,
+    .bm-backup-wrap .widefat th {
+        font-size: 12px;
+        padding: 6px 4px;
+    }
 }
