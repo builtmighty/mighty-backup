@@ -114,7 +114,7 @@ class BM_Backup_Settings {
             true
         );
         wp_localize_script( 'bm-backup-admin', 'bmBackup', [
-            'ajaxUrl' => is_multisite() ? network_admin_url( 'admin-ajax.php' ) : admin_url( 'admin-ajax.php' ),
+            'ajaxUrl' => admin_url( 'admin-ajax.php' ),
             'nonce'   => wp_create_nonce( 'bm_backup_nonce' ),
         ] );
     }
