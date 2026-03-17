@@ -85,6 +85,9 @@ class BM_Backup_Settings {
      * Register settings fields.
      */
     public function register_settings(): void {
+        if ( is_multisite() ) {
+            return; // On multisite, settings are saved via save_network_settings().
+        }
         register_setting( 'bm_backup_settings_group', self::OPTION_KEY, [
             'sanitize_callback' => [ $this, 'sanitize_settings' ],
         ] );
@@ -188,6 +191,7 @@ class BM_Backup_Settings {
 
         // Secret key — encrypt before storing. If field is empty, keep the old value.
         $raw_secret = $input['spaces_secret_key'] ?? '';
+
         if ( ! empty( $raw_secret ) && $raw_secret !== '••••••••' ) {
             $encrypted = $this->encrypt( $raw_secret );
             // Never store empty — keep old value if encryption somehow fails.
