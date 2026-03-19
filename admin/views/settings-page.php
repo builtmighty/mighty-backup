@@ -21,6 +21,31 @@ $recent    = $logger->get_recent( 20 );
 <div class="wrap bm-backup-wrap">
     <h1><?php esc_html_e( 'BM Site Backup', 'builtmighty-site-backup' ); ?></h1>
 
+    <?php if ( BM_Backup_Dev_Mode::is_dev_mode() ) : ?>
+        <div class="notice notice-warning inline" style="margin-top:10px;">
+            <p>
+                <strong><?php esc_html_e( 'Dev Mode Active', 'builtmighty-site-backup' ); ?></strong> &mdash;
+                <?php esc_html_e( 'Automatic backups are disabled because the site URL has changed from the original.', 'builtmighty-site-backup' ); ?>
+            </p>
+            <p class="description">
+                <?php
+                printf(
+                    /* translators: 1: original URL, 2: current URL */
+                    esc_html__( 'Original: %1$s | Current: %2$s', 'builtmighty-site-backup' ),
+                    '<code>' . esc_html( BM_Backup_Dev_Mode::get_live_url() ) . '</code>',
+                    '<code>' . esc_html( network_site_url() ) . '</code>'
+                );
+                ?>
+            </p>
+            <p>
+                <button type="button" id="bm-exit-dev-mode" class="button button-primary">
+                    <?php esc_html_e( 'Enable Automatic Backups', 'builtmighty-site-backup' ); ?>
+                </button>
+                <span id="bm-dev-mode-result" class="bm-result-message" aria-live="polite"></span>
+            </p>
+        </div>
+    <?php endif; ?>
+
     <?php if ( isset( $_GET['updated'] ) ) : ?>
         <div class="notice notice-success is-dismissible">
             <p><?php esc_html_e( 'Settings saved.', 'builtmighty-site-backup' ); ?></p>
@@ -39,6 +64,7 @@ $recent    = $logger->get_recent( 20 );
         <a href="#schedule" class="nav-tab" data-tab="schedule"><?php esc_html_e( 'Schedule', 'builtmighty-site-backup' ); ?></a>
         <a href="#backup" class="nav-tab" data-tab="backup"><?php esc_html_e( 'Backup', 'builtmighty-site-backup' ); ?></a>
         <a href="#codespace" class="nav-tab" data-tab="codespace"><?php esc_html_e( 'Codespace', 'builtmighty-site-backup' ); ?></a>
+        <a href="#devcontainer" class="nav-tab" data-tab="devcontainer"><?php esc_html_e( 'Devcontainer', 'builtmighty-site-backup' ); ?></a>
     </nav>
 
     <form method="post" action="<?php echo esc_url( $action ); ?>" id="bm-settings-form">
@@ -283,7 +309,76 @@ $recent    = $logger->get_recent( 20 );
 
             <?php submit_button(); ?>
         </div><!-- /schedule -->
+
+        <!-- Devcontainer Tab — GitHub Settings (inside form) -->
+        <div class="bm-tab-panel" data-tab="devcontainer">
+            <h2><?php esc_html_e( 'GitHub Repository', 'builtmighty-site-backup' ); ?></h2>
+            <table class="form-table">
+                <tr>
+                    <th scope="row">
+                        <label for="bm_github_owner"><?php esc_html_e( 'GitHub Owner', 'builtmighty-site-backup' ); ?></label>
+                    </th>
+                    <td>
+                        <input type="text" id="bm_github_owner"
+                               name="bm_backup_settings[github_owner]"
+                               value="<?php echo esc_attr( $settings['github_owner'] ); ?>"
+                               class="regular-text"
+                               placeholder="builtmighty" />
+                        <p class="description"><?php esc_html_e( 'GitHub organization or user that owns the repository. Defaults to "builtmighty" if left blank.', 'builtmighty-site-backup' ); ?></p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label for="bm_github_repo"><?php esc_html_e( 'Repository Slug', 'builtmighty-site-backup' ); ?></label>
+                    </th>
+                    <td>
+                        <input type="text" id="bm_github_repo"
+                               name="bm_backup_settings[github_repo]"
+                               value="<?php echo esc_attr( $settings['github_repo'] ); ?>"
+                               class="regular-text"
+                               placeholder="<?php echo esc_attr( $settings['client_path'] ?: 'client-repo' ); ?>" />
+                        <p class="description"><?php esc_html_e( 'The repository name (slug only, not full URL). Defaults to the GitHub Repository setting from the Storage tab if left blank.', 'builtmighty-site-backup' ); ?></p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">
+                        <label for="bm_github_pat"><?php esc_html_e( 'Personal Access Token', 'builtmighty-site-backup' ); ?></label>
+                    </th>
+                    <td>
+                        <input type="password" id="bm_github_pat"
+                               name="bm_backup_settings[github_pat]"
+                               value="<?php echo ! empty( $settings['github_pat_enc'] ) ? '••••••••' : ''; ?>"
+                               class="regular-text" autocomplete="new-password" />
+                        <button type="button" class="bm-toggle-password" data-target="bm_github_pat"><?php esc_html_e( 'Show', 'builtmighty-site-backup' ); ?></button>
+                        <p class="description"><?php esc_html_e( 'Leave blank to keep the current token. Requires "repo" scope for private repositories.', 'builtmighty-site-backup' ); ?></p>
+                    </td>
+                </tr>
+            </table>
+
+            <?php submit_button(); ?>
+        </div><!-- /devcontainer (github settings) -->
     </form>
+
+    <!-- Devcontainer Tab — Update Section (outside form, AJAX-driven) -->
+    <div class="bm-tab-panel" data-tab="devcontainer" id="bm-devcontainer-update-wrap">
+        <hr />
+        <h2><?php esc_html_e( 'Devcontainer Update', 'builtmighty-site-backup' ); ?></h2>
+        <p>
+            <button type="button" id="bm-devcontainer-check" class="button button-secondary">
+                <?php esc_html_e( 'Check Version', 'builtmighty-site-backup' ); ?>
+            </button>
+            <span id="bm-devcontainer-status" class="bm-result-message" aria-live="polite"></span>
+        </p>
+        <div id="bm-devcontainer-update-section" style="display:none;">
+            <p id="bm-devcontainer-version-info"></p>
+            <p>
+                <button type="button" id="bm-devcontainer-update" class="button button-primary">
+                    <?php esc_html_e( 'Install / Update Devcontainer', 'builtmighty-site-backup' ); ?>
+                </button>
+                <span id="bm-devcontainer-update-result" class="bm-result-message" aria-live="polite"></span>
+            </p>
+        </div>
+    </div><!-- /devcontainer (update) -->
 
     <!-- Backup Tab -->
     <div class="bm-tab-panel" data-tab="backup">
@@ -307,6 +402,9 @@ $recent    = $logger->get_recent( 20 );
             <p>
                 <strong><?php esc_html_e( 'Next scheduled:', 'builtmighty-site-backup' ); ?></strong>
                 <?php echo esc_html( gmdate( 'Y-m-d H:i:s', $next_run ) . ' UTC' ); ?>
+                <?php if ( BM_Backup_Dev_Mode::is_dev_mode() ) : ?>
+                    <em>(<?php esc_html_e( 'paused — dev mode', 'builtmighty-site-backup' ); ?>)</em>
+                <?php endif; ?>
             </p>
         <?php endif; ?>
         <p>

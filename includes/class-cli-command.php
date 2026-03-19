@@ -9,6 +9,7 @@
  *   wp bm-backup list [--type=<type>]
  *   wp bm-backup prune
  *   wp bm-backup test
+ *   wp bm-backup dev-mode [--disable]
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -145,10 +146,18 @@ class BM_Backup_CLI_Command {
             WP_CLI::log( "\nNo completed backups found." );
         }
 
+        // Dev mode.
+        if ( BM_Backup_Dev_Mode::is_dev_mode() ) {
+            WP_CLI::warning( 'Dev mode is active — scheduled backups are paused (site URL mismatch).' );
+            WP_CLI::log( sprintf( '  Live URL:    %s', BM_Backup_Dev_Mode::get_live_url() ) );
+            WP_CLI::log( sprintf( '  Current URL: %s', network_site_url() ) );
+        }
+
         // Next scheduled run.
         $next = $scheduler->get_next_run();
         if ( $next ) {
-            WP_CLI::log( sprintf( "\nNext scheduled: %s UTC", gmdate( 'Y-m-d H:i:s', $next ) ) );
+            $suffix = BM_Backup_Dev_Mode::is_dev_mode() ? ' (paused — dev mode)' : '';
+            WP_CLI::log( sprintf( "\nNext scheduled: %s UTC%s", gmdate( 'Y-m-d H:i:s', $next ), $suffix ) );
         } else {
             WP_CLI::log( "\nNo backup scheduled." );
         }
@@ -292,6 +301,56 @@ class BM_Backup_CLI_Command {
 
         } catch ( \Exception $e ) {
             WP_CLI::error( $e->getMessage() );
+        }
+    }
+
+    /**
+     * Show or change the dev mode status.
+     *
+     * Dev mode is automatically activated when the site URL changes (e.g.
+     * after cloning to staging).  Scheduled backups are paused until dev
+     * mode is explicitly disabled.
+     *
+     * ## OPTIONS
+     *
+     * [--disable]
+     * : Exit dev mode by updating the stored URL to the current site URL
+     *   and rescheduling backups.
+     *
+     * ## EXAMPLES
+     *
+     *     wp bm-backup dev-mode
+     *     wp bm-backup dev-mode --disable
+     *
+     * @subcommand dev-mode
+     */
+    public function dev_mode( $args, $assoc_args ) {
+        $live_url    = BM_Backup_Dev_Mode::get_live_url();
+        $current_url = network_site_url();
+        $is_dev      = BM_Backup_Dev_Mode::is_dev_mode();
+
+        if ( isset( $assoc_args['disable'] ) ) {
+            if ( ! $is_dev ) {
+                WP_CLI::success( 'Dev mode is not active — nothing to do.' );
+                return;
+            }
+
+            update_site_option( BM_Backup_Dev_Mode::LIVE_URL_OPTION, $current_url );
+
+            $scheduler = new BM_Backup_Scheduler();
+            $scheduler->reschedule();
+
+            WP_CLI::success( 'Dev mode disabled. Automatic backups re-enabled.' );
+            return;
+        }
+
+        // Display status.
+        WP_CLI::log( sprintf( 'Dev mode:    %s', $is_dev ? 'ACTIVE' : 'inactive' ) );
+        WP_CLI::log( sprintf( 'Live URL:    %s', $live_url ?: '(not set)' ) );
+        WP_CLI::log( sprintf( 'Current URL: %s', $current_url ) );
+
+        if ( $is_dev ) {
+            WP_CLI::warning( 'Scheduled backups are paused. Run "wp bm-backup dev-mode --disable" to re-enable.' );
         }
     }
 }

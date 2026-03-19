@@ -480,6 +480,112 @@
         $(this).text($cell.hasClass('expanded') ? 'Show less' : 'Show more');
     });
 
+    // --- Exit Dev Mode ---
+
+    $('#bm-exit-dev-mode').on('click', function () {
+        var $btn = $(this);
+        var $result = $('#bm-dev-mode-result');
+
+        $btn.prop('disabled', true).text('Enabling...');
+        $result.removeClass('success error').text('');
+
+        $.post(bmBackup.ajaxUrl, {
+            action: 'bm_backup_exit_dev_mode',
+            nonce: bmBackup.nonce,
+        })
+        .done(function (response) {
+            if (response.success) {
+                $result.addClass('success').text(response.data.message || 'Automatic backups re-enabled.');
+                setTimeout(function () { location.reload(); }, 1200);
+            } else {
+                $result.addClass('error').text(response.data || 'Failed to exit dev mode.');
+                $btn.prop('disabled', false).text('Enable Automatic Backups');
+            }
+        })
+        .fail(function () {
+            $result.addClass('error').text('Request failed.');
+            $btn.prop('disabled', false).text('Enable Automatic Backups');
+        });
+    });
+
+    // --- Devcontainer: Check Version ---
+
+    $('#bm-devcontainer-check').on('click', function () {
+        var $btn = $(this);
+        var $status = $('#bm-devcontainer-status');
+        var $updateSection = $('#bm-devcontainer-update-section');
+        var $versionInfo = $('#bm-devcontainer-version-info');
+
+        $btn.prop('disabled', true);
+        $status.removeClass('success error').addClass('loading').text('Checking...');
+        $updateSection.hide();
+
+        $.post(bmBackup.ajaxUrl, {
+            action: 'bm_backup_devcontainer_check',
+            nonce: bmBackup.nonce,
+        })
+        .done(function (response) {
+            if (!response.success) {
+                $status.removeClass('loading').addClass('error').text(response.data);
+                return;
+            }
+
+            var d = response.data;
+
+            if (d.status === 'up_to_date') {
+                showResultTimed($status, 'success', 'Up to date (v' + d.latest + ')', 6000);
+                $updateSection.hide();
+            } else if (d.status === 'outdated') {
+                $status.removeClass('loading').addClass('error').text('Out of date');
+                $versionInfo.text('Current: v' + d.current + '  —  Latest: v' + d.latest);
+                $updateSection.show();
+            } else if (d.status === 'not_installed') {
+                $status.removeClass('loading').addClass('error').text('Not installed');
+                $versionInfo.text('Latest available: v' + d.latest);
+                $updateSection.show();
+            }
+        })
+        .fail(function () {
+            $status.removeClass('loading').addClass('error').text('Request failed.');
+        })
+        .always(function () {
+            $btn.prop('disabled', false);
+        });
+    });
+
+    // --- Devcontainer: Install / Update ---
+
+    $('#bm-devcontainer-update').on('click', function () {
+        var $btn = $(this);
+        var $result = $('#bm-devcontainer-update-result');
+
+        bmConfirm('Create a PR to update .devcontainer to the latest version?').then(function (confirmed) {
+            if (!confirmed) return;
+
+            $btn.prop('disabled', true);
+            $result.removeClass('success error').addClass('loading').text('Creating PR...');
+
+            $.post(bmBackup.ajaxUrl, {
+                action: 'bm_backup_devcontainer_update',
+                nonce: bmBackup.nonce,
+            })
+            .done(function (response) {
+                if (response.success) {
+                    $result.removeClass('loading').addClass('success').html(
+                        'PR created! <a href="' + response.data.pr_url + '" target="_blank" rel="noopener">View Pull Request</a>'
+                    );
+                } else {
+                    $result.removeClass('loading').addClass('error').text(response.data);
+                    $btn.prop('disabled', false);
+                }
+            })
+            .fail(function () {
+                $result.removeClass('loading').addClass('error').text('Request failed.');
+                $btn.prop('disabled', false);
+            });
+        });
+    });
+
     // --- Day-of-Week Smooth Toggle ---
 
     $('#bm_schedule_frequency').on('change', function () {

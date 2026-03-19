@@ -81,6 +81,12 @@ class BM_Backup_Scheduler {
             return;
         }
 
+        // Dev mode: skip scheduled backups when the site URL has changed.
+        if ( BM_Backup_Dev_Mode::is_dev_mode() ) {
+            error_log( 'BM Site Backup: Scheduled backup skipped — dev mode active (site URL mismatch).' );
+            return;
+        }
+
         try {
             $manager = new BM_Backup_Manager();
             $manager->schedule( 'full', 'scheduled' );

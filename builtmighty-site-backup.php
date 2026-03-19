@@ -3,7 +3,7 @@
  * Plugin Name: BuiltMighty Site Backup
  * Plugin URI: https://github.com/builtmighty/builtmighty-site-backup
  * Description: Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand backups of the database and file system for use with the staged-loader Codespace pipeline.
- * Version: 1.9.2
+ * Version: 1.11.0
  * Author: Built Mighty
  * Author URI: https://builtmighty.com
  * License: GPL-2.0-or-later
@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'BM_BACKUP_VERSION', '1.9.2' );
+define( 'BM_BACKUP_VERSION', '1.11.0' );
 define( 'BM_BACKUP_FILE', __FILE__ );
 define( 'BM_BACKUP_DIR', plugin_dir_path( __FILE__ ) );
 define( 'BM_BACKUP_URL', plugin_dir_url( __FILE__ ) );
@@ -86,6 +86,8 @@ require_once BM_BACKUP_DIR . 'includes/class-file-archiver.php';
 require_once BM_BACKUP_DIR . 'includes/class-retention-manager.php';
 require_once BM_BACKUP_DIR . 'includes/class-scheduler.php';
 require_once BM_BACKUP_DIR . 'includes/class-backup-manager.php';
+require_once BM_BACKUP_DIR . 'includes/class-dev-mode.php';
+require_once BM_BACKUP_DIR . 'includes/class-devcontainer-manager.php';
 
 /**
  * Plugin activation.
@@ -105,6 +107,8 @@ function bm_backup_activate( $network_wide ) {
     if ( $network_wide && is_multisite() ) {
         restore_current_blog();
     }
+
+    BM_Backup_Dev_Mode::maybe_set_live_url();
 }
 register_activation_hook( __FILE__, 'bm_backup_activate' );
 
@@ -130,9 +134,18 @@ register_deactivation_hook( __FILE__, 'bm_backup_deactivate' );
  * Initialize the plugin.
  */
 function bm_backup_init() {
+    // Dev mode — seed live URL for existing installs and hook admin notices.
+    BM_Backup_Dev_Mode::maybe_set_live_url();
+    $dev_mode = new BM_Backup_Dev_Mode();
+    $dev_mode->init();
+
     // Settings page (always load — shows notice if deps missing).
     $settings = new BM_Backup_Settings();
     $settings->init();
+
+    // Devcontainer manager — GitHub API version check and update.
+    $devcontainer = new BM_Devcontainer_Manager( $settings );
+    $devcontainer->init();
 
     // Codespace bootstrap endpoint.
     $endpoint = new BM_Backup_Api_Endpoint();

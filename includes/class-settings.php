@@ -223,6 +223,18 @@ class BM_Backup_Settings {
         // Database export mode.
         $sanitized['streamlined_mode'] = ! empty( $input['streamlined_mode'] );
 
+        // GitHub (Devcontainer).
+        $sanitized['github_owner'] = sanitize_text_field( $input['github_owner'] ?? '' );
+        $sanitized['github_repo']  = sanitize_text_field( $input['github_repo'] ?? '' );
+
+        $raw_pat = $input['github_pat'] ?? '';
+        if ( ! empty( $raw_pat ) && $raw_pat !== '••••••••' ) {
+            $encrypted = $this->encrypt( $raw_pat );
+            $sanitized['github_pat_enc'] = ! empty( $encrypted ) ? $encrypted : ( $current['github_pat_enc'] ?? '' );
+        } else {
+            $sanitized['github_pat_enc'] = $current['github_pat_enc'] ?? '';
+        }
+
         return $sanitized;
     }
 
@@ -245,6 +257,9 @@ class BM_Backup_Settings {
             'notification_email'    => '',
             'hosting_provider'      => '',
             'streamlined_mode'      => false,
+            'github_owner'          => '',
+            'github_repo'           => '',
+            'github_pat_enc'        => '',
         ];
 
         $saved = get_site_option( self::OPTION_KEY, [] );
@@ -271,6 +286,17 @@ class BM_Backup_Settings {
      */
     public function get_secret_key(): string {
         $encrypted = $this->get( 'spaces_secret_key_enc' );
+        if ( empty( $encrypted ) ) {
+            return '';
+        }
+        return $this->decrypt( $encrypted );
+    }
+
+    /**
+     * Get the decrypted GitHub Personal Access Token.
+     */
+    public function get_github_pat(): string {
+        $encrypted = $this->get( 'github_pat_enc' );
         if ( empty( $encrypted ) ) {
             return '';
         }
