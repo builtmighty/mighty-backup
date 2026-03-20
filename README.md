@@ -20,11 +20,15 @@ wp plugin install https://github.com/builtmighty/builtmighty-site-backup/release
 - **Full, Database, or Files-only backups** — choose what to back up
 - **Scheduled backups** — daily, twice daily, or weekly via WP-Cron
 - **DigitalOcean Spaces storage** — multipart uploads with retry and resume
+- **Streamlined Mode** — lighter database exports that filter WooCommerce orders to the last 90 days and export log tables as structure only
+- **Live backup log** — real-time progress display with timestamped entries during backup
 - **Retention management** — automatically prunes old backups beyond a configurable limit
 - **Backup history** — logs every backup with status, sizes, and errors
 - **Email notifications** — alerts on backup failure
-- **Codespace integration** — REST API endpoint for the bootstrap pipeline
-- **WP-CLI support** — full command-line interface
+- **Dev Mode detection** — prevents dev/staging sites from overwriting production backups
+- **Codespace integration** — REST API endpoint and bootstrap key for the pipeline
+- **Devcontainer management** — check and update .devcontainer config via GitHub API
+- **WP-CLI support** — full command-line interface with timeout control
 - **Multisite compatible** — settings stored at the network level
 - **Cancel in-progress backups** — stop a running backup from the admin UI or WP-CLI
 - **Developer filters** — tune batch size, part size, concurrency, and gzip levels via `add_filter()`
@@ -73,7 +77,7 @@ The following paths are always excluded from file backups:
 
 ```bash
 # Run a backup (synchronous by default)
-wp bm-backup run [--type=<full|db|files>] [--async]
+wp bm-backup run [--type=<full|db|files>] [--async] [--timeout=<seconds>]
 
 # Check backup status
 wp bm-backup status
@@ -95,12 +99,15 @@ wp bm-backup test
 | Filter | Default | Description |
 |--------|---------|-------------|
 | `bm_backup_db_batch_size` | `1000` | Rows per paginated DB export query |
-| `bm_backup_db_gzip_level` | `6` | Gzip compression level for DB dump |
-| `bm_backup_files_gzip_level` | `6` | Gzip compression level for file archive |
-| `bm_backup_upload_part_size` | `10485760` | Multipart upload part size in bytes (10 MB) |
+| `bm_backup_db_gzip_level` | `3` | Gzip compression level for DB dump (1–9) |
+| `bm_backup_files_gzip_level` | `3` | Gzip compression level for file archive (1–9) |
+| `bm_backup_upload_part_size` | `26214400` | Multipart upload part size in bytes (25 MB) |
 | `bm_backup_upload_concurrency` | `5` | Concurrent upload parts |
 | `bm_backup_upload_max_retries` | `3` | Max upload retries per part |
 | `bm_backup_admin_domains` | `['builtmighty.com']` | Email domains permitted to access the settings page |
+| `bm_backup_streamlined_days` | `90` | Days of WooCommerce orders to include in streamlined mode |
+| `bm_backup_is_log_table` | `(bool)` | Override whether a table is treated as a log table in streamlined mode |
+| `bm_backup_order_table_config` | `(array)` | Override the order table → ID column mapping in streamlined mode |
 
 ### Action Hooks
 
@@ -137,7 +144,7 @@ Backups are executed as a chain of background steps via Action Scheduler:
 1. **Start** — initialize backup, create log entry
 2. **Export Database** — stream a gzipped SQL dump using primary-key pagination
 3. **Archive Files** — create a `tar.gz` archive (shell `tar` preferred, PharData fallback)
-4. **Upload Database** — multipart upload to Spaces (10 MB parts, 5 concurrent)
+4. **Upload Database** — multipart upload to Spaces (25 MB parts, 5 concurrent)
 5. **Upload Files** — multipart upload to Spaces
 6. **Cleanup** — run retention policy, delete temp files, mark complete
 

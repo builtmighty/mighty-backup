@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups, builtmighty
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 1.11.0
+Stable tag: 1.12.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,15 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 1.12.0 =
+* Fixed stderr redirection in mysqldump — errors no longer silently corrupt SQL dumps
+* Added tar safety checks — files > 8 GB or paths > 255 chars are skipped with log warning
+* Added --timeout flag to WP-CLI run command (default 6 hours)
+* Extracted shared bm_backup_is_authorized_user() to eliminate code duplication
+* Fixed symlink following in file archiver — prevents infinite loops from circular symlinks
+* Fixed gzip concatenation in streamlined hybrid export — single gzip stream for compatibility
+* Freed large temporary arrays in postmeta streamlined export
 
 = 1.11.0 =
 * Full plugin audit — performance hardening and security fixes
