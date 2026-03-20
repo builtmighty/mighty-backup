@@ -106,6 +106,14 @@ class BM_Devcontainer_Manager {
 					'latest'  => $latest_version,
 				];
 			}
+			// Missing version field → assume outdated.
+			if ( str_contains( $e->getMessage(), 'does not contain a "version" field' ) ) {
+				return [
+					'status'  => 'outdated',
+					'current' => null,
+					'latest'  => $latest_version,
+				];
+			}
 			throw $e;
 		}
 
@@ -211,11 +219,12 @@ class BM_Devcontainer_Manager {
 				continue;
 			}
 			$global_paths[ $entry['path'] ] = true;
+			$new_sha = $this->copy_blob_to_repo( $entry['sha'], $owner, $repo );
 			$tree_items[] = [
 				'path' => $entry['path'],
 				'mode' => $entry['mode'],
 				'type' => 'blob',
-				'sha'  => $entry['sha'],
+				'sha'  => $new_sha,
 			];
 		}
 
@@ -301,6 +310,35 @@ class BM_Devcontainer_Manager {
 	// ------------------------------------------------------------------
 	// Private helpers
 	// ------------------------------------------------------------------
+
+	/**
+	 * Copy a blob from the global template repo into the target repo.
+	 *
+	 * GitHub's Create Tree API requires blob SHAs to exist in the target
+	 * repository. This fetches the blob content from the template and
+	 * creates a matching blob in the target repo.
+	 *
+	 * @param string $sha   Blob SHA in the global template repo.
+	 * @param string $owner Target repo owner.
+	 * @param string $repo  Target repo name.
+	 * @return string The new blob SHA in the target repo.
+	 */
+	private function copy_blob_to_repo( string $sha, string $owner, string $repo ): string {
+		$blob = $this->api_get(
+			self::API_BASE . '/repos/' . self::GLOBAL_OWNER . '/' . self::GLOBAL_REPO
+				. '/git/blobs/' . $sha
+		);
+
+		$new_blob = $this->api_post(
+			self::API_BASE . '/repos/' . $owner . '/' . $repo . '/git/blobs',
+			[
+				'content'  => $blob['content'],
+				'encoding' => $blob['encoding'],
+			]
+		);
+
+		return $new_blob['sha'];
+	}
 
 	/**
 	 * Get the GitHub owner, repo, and PAT from settings with fallbacks.

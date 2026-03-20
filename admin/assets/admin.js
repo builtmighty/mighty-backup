@@ -599,7 +599,11 @@
                 $updateSection.hide();
             } else if (d.status === 'outdated') {
                 $status.removeClass('loading').addClass('error').text('Out of date');
-                $versionInfo.text('Current: v' + d.current + '  —  Latest: v' + d.latest);
+                if (d.current) {
+                    $versionInfo.text('Current: v' + d.current + '  —  Latest: v' + d.latest);
+                } else {
+                    $versionInfo.text('Current: unknown (no version field)  —  Latest: v' + d.latest);
+                }
                 $updateSection.show();
             } else if (d.status === 'not_installed') {
                 $status.removeClass('loading').addClass('error').text('Not installed');

@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups, builtmighty
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 1.12.0
+Stable tag: 1.13.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,10 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 1.13.0 =
+* Devcontainer version check now treats missing version field as outdated instead of erroring
+* Fixed cross-repo blob SHA issue in devcontainer install/update — blobs are now copied to the target repo before tree creation
 
 = 1.12.0 =
 * Fixed stderr redirection in mysqldump — errors no longer silently corrupt SQL dumps
