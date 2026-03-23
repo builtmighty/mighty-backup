@@ -139,13 +139,18 @@ class BM_Backup_File_Archiver {
                     }
 
                     // Circular symlink protection: skip directories we've already traversed.
+                    // If getRealPath() fails (common on containerized hosts like Pressable
+                    // where symlink targets can't be resolved), still enter the directory —
+                    // archiving content is more important than circular-link protection.
                     if ( $file->isDir() ) {
                         $real = $file->getRealPath();
-                        if ( $real === false || isset( $visited_dirs[ $real ] ) ) {
-                            BM_Backup_Log_Stream::add( 'Skipped (unresolvable or circular): ' . $relative_path );
-                            return false;
+                        if ( $real !== false ) {
+                            if ( isset( $visited_dirs[ $real ] ) ) {
+                                BM_Backup_Log_Stream::add( 'Skipped circular symlink: ' . $relative_path );
+                                return false;
+                            }
+                            $visited_dirs[ $real ] = true;
                         }
-                        $visited_dirs[ $real ] = true;
                     }
 
                     return true;
@@ -180,7 +185,7 @@ class BM_Backup_File_Archiver {
                     gzwrite( $gz, $this->build_tar_header( $relative_path, $size, $file->getMTime(), $file->getPerms(), '0' ) );
 
                     // Stream file contents in 64 KB chunks directly into gzip.
-                    $fh = fopen( $file->getRealPath(), 'rb' );
+                    $fh = fopen( $file->getRealPath() ?: $file->getPathname(), 'rb' );
                     if ( $fh ) {
                         while ( ! feof( $fh ) ) {
                             $chunk = fread( $fh, 65536 );

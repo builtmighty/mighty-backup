@@ -448,6 +448,7 @@ class BM_Backup_Settings {
 
         $manager = new BM_Backup_Manager();
         $manager->clear_state();
+        BM_Backup_Log_Stream::clear();
         wp_send_json_success();
     }
 
