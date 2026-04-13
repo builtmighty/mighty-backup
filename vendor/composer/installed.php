@@ -1,9 +1,9 @@
 <?php return array(
     'root' => array(
-        'name' => 'builtmighty/site-backup',
-        'pretty_version' => '1.12.0',
-        'version' => '1.12.0.0',
-        'reference' => 'ffe7eb6dadb9903047f70421395c2f9c9be1279e',
+        'name' => 'builtmighty/mighty-backup',
+        'pretty_version' => '2.5.0',
+        'version' => '2.5.0.0',
+        'reference' => '2aa98bfc53312c609c05bd2dd7732f1bd7d4e1b7',
         'type' => 'wordpress-plugin',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -28,10 +28,10 @@
             'aliases' => array(),
             'dev_requirement' => false,
         ),
-        'builtmighty/site-backup' => array(
-            'pretty_version' => '1.12.0',
-            'version' => '1.12.0.0',
-            'reference' => 'ffe7eb6dadb9903047f70421395c2f9c9be1279e',
+        'builtmighty/mighty-backup' => array(
+            'pretty_version' => '2.5.0',
+            'version' => '2.5.0.0',
+            'reference' => '2aa98bfc53312c609c05bd2dd7732f1bd7d4e1b7',
             'type' => 'wordpress-plugin',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

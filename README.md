@@ -27,7 +27,7 @@ wp plugin install https://github.com/builtmighty/mighty-backup/releases/latest/d
 - **Email notifications** — alerts on backup failure
 - **Dev Mode detection** — prevents dev/staging sites from overwriting production backups
 - **Codespace integration** — REST API endpoint and bootstrap key for the pipeline
-- **Devcontainer management** — check and update .devcontainer config via GitHub API with automatic Codespace tier sizing (with 20% headroom) based on site disk usage; creates resize PRs when a site outgrows its current tier
+- **Devcontainer management** — check and update .devcontainer config via GitHub API with automatic Codespace tier sizing (with 20% headroom) based on site disk usage; creates resize PRs when a site outgrows its current tier; target branch is selectable from a dropdown of the repo's branches (defaults to the repo's default branch)
 - **Self-driving backup processing** — backup steps are processed directly during admin UI polling and WP-CLI execution, with no dependency on WP-Cron or Action Scheduler's async dispatcher
 - **WP-CLI support** — full command-line interface with timeout control
 - **Automatic updates** — auto-updates from GitHub releases via built-in update checker
@@ -91,6 +91,9 @@ wp mighty-backup run [--type=<full|db|files>] [--async] [--timeout=<seconds>]
 # Check backup status
 wp mighty-backup status
 
+# Cancel a running or pending backup
+wp mighty-backup cancel
+
 # List backups stored on Spaces
 wp mighty-backup list [--type=<all|db|files>]
 
@@ -99,6 +102,82 @@ wp mighty-backup prune
 
 # Test the Spaces connection
 wp mighty-backup test
+
+# Show / exit dev mode
+wp mighty-backup dev-mode [--disable]
+```
+
+### Settings Management
+
+All plugin settings can be read and written from the CLI. Encrypted fields
+(`spaces_secret_key`, `github_pat`) are encrypted transparently on `set` and
+masked in `list` / `get` output unless you opt-in with `--show-secret(s)`.
+
+```bash
+# List every setting (encrypted fields shown as ••••••••)
+wp mighty-backup settings list [--format=<table|json|yaml|csv>] [--show-secrets]
+
+# Read a single setting
+wp mighty-backup settings get <key> [--show-secret]
+
+# Write a single setting (booleans accept 1/0, true/false, yes/no, on/off)
+wp mighty-backup settings set <key> <value>
+```
+
+Examples:
+
+```bash
+wp mighty-backup settings set spaces_access_key "DO00XXXX..."
+wp mighty-backup settings set spaces_secret_key "s3cret-v@lue"
+wp mighty-backup settings set spaces_endpoint nyc3.digitaloceanspaces.com
+wp mighty-backup settings set spaces_bucket my-bucket
+wp mighty-backup settings set client_path my-client-repo
+wp mighty-backup settings set schedule_frequency weekly
+wp mighty-backup settings set schedule_day monday
+wp mighty-backup settings set schedule_time 03:00
+wp mighty-backup settings set retention_count 14
+wp mighty-backup settings set notify_on_failure 1
+wp mighty-backup settings set notification_email ops@example.com
+wp mighty-backup settings set github_pat "ghp_NEWVALUE"
+```
+
+Writable keys: `spaces_access_key`, `spaces_secret_key`, `spaces_endpoint`,
+`spaces_bucket`, `client_path`, `hosting_provider`, `schedule_frequency`,
+`schedule_time`, `schedule_day`, `retention_count`, `extra_exclusions`,
+`notify_on_failure`, `notification_email`, `streamlined_mode`, `github_owner`,
+`github_repo`, `github_pat`.
+
+### Devcontainer
+
+Manage the repo's `.devcontainer` configuration via the GitHub API — the CLI
+equivalent of the Devcontainer tab in the admin UI.
+
+```bash
+# Check current vs. latest version and list available branches
+wp mighty-backup devcontainer check [--format=<table|json|yaml>]
+
+# Create a PR to install or update .devcontainer
+wp mighty-backup devcontainer update [--branch=<branch>] [--yes]
+```
+
+If `--branch` is omitted, the PR targets the repository's default branch.
+`--yes` skips the confirmation prompt (useful for automation).
+
+### Codespace Bootstrap API Key
+
+The `bm_backup_api_key` option authenticates the Codespace config REST
+endpoint. The printed "bootstrap key" is what you paste into the
+`BM_BOOTSTRAP_KEY` Codespace secret.
+
+```bash
+# Generate (or regenerate) the API key — prints the bootstrap key
+wp mighty-backup api-key generate
+
+# Show the current bootstrap key (add --raw for the raw API key)
+wp mighty-backup api-key show [--raw]
+
+# Delete the API key (disables the Codespace config endpoint)
+wp mighty-backup api-key delete
 ```
 
 ## Developer Hooks & Filters

@@ -10,6 +10,14 @@
  *   wp mighty-backup prune
  *   wp mighty-backup test
  *   wp mighty-backup dev-mode [--disable]
+ *   wp mighty-backup settings list [--format=<format>] [--show-secrets]
+ *   wp mighty-backup settings get <key> [--show-secret]
+ *   wp mighty-backup settings set <key> <value>
+ *   wp mighty-backup api-key generate
+ *   wp mighty-backup api-key show [--raw]
+ *   wp mighty-backup api-key delete
+ *   wp mighty-backup devcontainer check [--format=<format>]
+ *   wp mighty-backup devcontainer update [--branch=<branch>] [--yes]
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -360,5 +368,357 @@ class Mighty_Backup_CLI_Command {
         if ( $is_dev ) {
             WP_CLI::warning( 'Scheduled backups are paused. Run "wp mighty-backup dev-mode --disable" to re-enable.' );
         }
+    }
+}
+
+/**
+ * WP-CLI commands for Mighty Backup settings.
+ *
+ * Encrypted fields (spaces_secret_key, github_pat) are handled transparently —
+ * pass plaintext to `set` and they are encrypted at rest; they are masked in
+ * `list` / `get` output unless you pass --show-secret(s).
+ */
+class Mighty_Backup_Settings_CLI_Command {
+
+    /**
+     * List all plugin settings.
+     *
+     * ## OPTIONS
+     *
+     * [--format=<format>]
+     * : Output format.
+     * ---
+     * default: table
+     * options:
+     *   - table
+     *   - json
+     *   - yaml
+     *   - csv
+     * ---
+     *
+     * [--show-secrets]
+     * : Decrypt and display encrypted fields. Use with care on shared terminals.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup settings list
+     *     wp mighty-backup settings list --format=json
+     *     wp mighty-backup settings list --show-secrets
+     *
+     * @subcommand list
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function list_( $args, $assoc_args ) {
+        $format = $assoc_args['format'] ?? 'table';
+        $reveal = isset( $assoc_args['show-secrets'] );
+
+        $settings = new Mighty_Backup_Settings();
+        $values   = $settings->get_all_display( $reveal );
+
+        $rows = [];
+        foreach ( $values as $key => $value ) {
+            $rows[] = [
+                'key'   => $key,
+                'value' => $value,
+            ];
+        }
+
+        WP_CLI\Utils\format_items( $format, $rows, [ 'key', 'value' ] );
+    }
+
+    /**
+     * Get a single setting value.
+     *
+     * ## OPTIONS
+     *
+     * <key>
+     * : The setting key.
+     *
+     * [--show-secret]
+     * : Decrypt and display encrypted fields. Only meaningful for
+     *   spaces_secret_key and github_pat.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup settings get spaces_bucket
+     *     wp mighty-backup settings get spaces_secret_key --show-secret
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function get( $args, $assoc_args ) {
+        $key    = $args[0] ?? '';
+        $reveal = isset( $assoc_args['show-secret'] );
+
+        if ( $key === '' ) {
+            WP_CLI::error( 'Missing <key>. Run "wp mighty-backup settings list" to see available keys.' );
+        }
+
+        try {
+            $settings = new Mighty_Backup_Settings();
+            $value    = $settings->get_value( $key, $reveal );
+            WP_CLI::log( $value );
+        } catch ( \InvalidArgumentException $e ) {
+            WP_CLI::error( $e->getMessage() );
+        }
+    }
+
+    /**
+     * Set a single setting value.
+     *
+     * Encrypted fields are encrypted transparently. The value is never echoed
+     * back to the terminal after a successful write.
+     *
+     * ## OPTIONS
+     *
+     * <key>
+     * : The setting key.
+     *
+     * <value>
+     * : The new value. Booleans accept 1/0, true/false, yes/no, or on/off.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup settings set spaces_access_key "DO00XXXX..."
+     *     wp mighty-backup settings set spaces_secret_key "s3cret-v@lue"
+     *     wp mighty-backup settings set schedule_frequency weekly
+     *     wp mighty-backup settings set schedule_time 03:30
+     *     wp mighty-backup settings set retention_count 14
+     *     wp mighty-backup settings set notify_on_failure 1
+     *     wp mighty-backup settings set notification_email ops@example.com
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function set( $args, $assoc_args ) {
+        $key   = $args[0] ?? '';
+        $value = $args[1] ?? null;
+
+        if ( $key === '' || $value === null ) {
+            WP_CLI::error( 'Usage: wp mighty-backup settings set <key> <value>' );
+        }
+
+        try {
+            $settings = new Mighty_Backup_Settings();
+            $settings->set_value( $key, (string) $value );
+
+            // Don't echo the value back — some of these are secrets.
+            WP_CLI::success( sprintf( 'Updated %s.', $key ) );
+        } catch ( \InvalidArgumentException $e ) {
+            WP_CLI::error( $e->getMessage() );
+        } catch ( \RuntimeException $e ) {
+            WP_CLI::error( $e->getMessage() );
+        }
+    }
+}
+
+/**
+ * WP-CLI commands for the Codespace bootstrap API key (bm_backup_api_key).
+ *
+ * The API key authenticates the `/wp-json/mighty-backup/v1/codespace-config`
+ * REST endpoint. The "bootstrap key" is the base64-encoded form of
+ * `{site_url}:{api_key}` — that value is what you paste into the
+ * `BM_BOOTSTRAP_KEY` Codespace secret.
+ */
+class Mighty_Backup_Api_Key_CLI_Command {
+
+    /**
+     * Generate (or regenerate) the Codespace bootstrap API key.
+     *
+     * Regenerating invalidates any existing key — update the BM_BOOTSTRAP_KEY
+     * secret in every Codespace that uses it.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup api-key generate
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function generate( $args, $assoc_args ) {
+        $existing = Mighty_Backup_Api_Endpoint::get_key();
+        if ( ! empty( $existing ) ) {
+            WP_CLI::log( 'Regenerating — any existing BM_BOOTSTRAP_KEY secret is now invalid.' );
+        }
+
+        Mighty_Backup_Api_Endpoint::generate_key();
+        $bootstrap = Mighty_Backup_Api_Endpoint::get_bootstrap_key();
+
+        WP_CLI::success( 'API key generated.' );
+        WP_CLI::log( 'Bootstrap key (add as BM_BOOTSTRAP_KEY Codespace secret):' );
+        WP_CLI::log( $bootstrap );
+    }
+
+    /**
+     * Show the current Codespace bootstrap key.
+     *
+     * ## OPTIONS
+     *
+     * [--raw]
+     * : Print the raw API key instead of the base64 bootstrap form.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup api-key show
+     *     wp mighty-backup api-key show --raw
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function show( $args, $assoc_args ) {
+        $raw = isset( $assoc_args['raw'] );
+        $key = Mighty_Backup_Api_Endpoint::get_key();
+
+        if ( empty( $key ) ) {
+            WP_CLI::error( 'No API key has been generated yet. Run "wp mighty-backup api-key generate".' );
+        }
+
+        if ( $raw ) {
+            WP_CLI::log( $key );
+            return;
+        }
+
+        WP_CLI::log( Mighty_Backup_Api_Endpoint::get_bootstrap_key() );
+    }
+
+    /**
+     * Delete the Codespace bootstrap API key.
+     *
+     * Disables the `/wp-json/mighty-backup/v1/codespace-config` endpoint
+     * until a new key is generated.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup api-key delete
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function delete( $args, $assoc_args ) {
+        if ( empty( Mighty_Backup_Api_Endpoint::get_key() ) ) {
+            WP_CLI::warning( 'No API key is set.' );
+            return;
+        }
+
+        delete_site_option( Mighty_Backup_Api_Endpoint::API_KEY_OPTION );
+        WP_CLI::success( 'API key deleted. The Codespace config endpoint is now disabled.' );
+    }
+}
+
+/**
+ * WP-CLI commands for managing the .devcontainer config via the GitHub API.
+ *
+ * Mirrors the Devcontainer tab in the admin UI: check the repo's current
+ * devcontainer.json version against the global template, and create a pull
+ * request to install or update when needed.
+ */
+class Mighty_Backup_Devcontainer_CLI_Command {
+
+    /**
+     * Check the repo's .devcontainer version against the global template.
+     *
+     * Shows the current version (if installed), the latest available version
+     * from the global template, and the list of branches available in the
+     * target repository.
+     *
+     * ## OPTIONS
+     *
+     * [--format=<format>]
+     * : Output format. Non-table formats emit the full raw payload including
+     *   the branch list.
+     * ---
+     * default: table
+     * options:
+     *   - table
+     *   - json
+     *   - yaml
+     * ---
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup devcontainer check
+     *     wp mighty-backup devcontainer check --format=json
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function check( $args, $assoc_args ) {
+        $format = $assoc_args['format'] ?? 'table';
+
+        try {
+            $manager = new Mighty_Devcontainer_Manager( new Mighty_Backup_Settings() );
+            $result  = $manager->check_version();
+        } catch ( \Exception $e ) {
+            WP_CLI::error( $e->getMessage() );
+        }
+
+        if ( $format !== 'table' ) {
+            WP_CLI::print_value( $result, [ 'format' => $format ] );
+            return;
+        }
+
+        $labels = [
+            'up_to_date'    => 'Up to date',
+            'outdated'      => 'Out of date',
+            'not_installed' => 'Not installed',
+        ];
+        $status_label = $labels[ $result['status'] ] ?? $result['status'];
+
+        WP_CLI::log( sprintf( 'Status:         %s', $status_label ) );
+        WP_CLI::log( sprintf( 'Current:        %s', $result['current'] ?? '(none)' ) );
+        WP_CLI::log( sprintf( 'Latest:         v%s', $result['latest'] ) );
+        WP_CLI::log( sprintf( 'Default branch: %s', $result['default_branch'] ) );
+
+        if ( ! empty( $result['branches'] ) ) {
+            WP_CLI::log( sprintf( 'Branches (%d):  %s', count( $result['branches'] ), implode( ', ', $result['branches'] ) ) );
+        }
+
+        if ( $result['status'] === 'up_to_date' ) {
+            WP_CLI::success( 'Devcontainer is up to date.' );
+        } else {
+            WP_CLI::warning( 'Run "wp mighty-backup devcontainer update" to create an update PR.' );
+        }
+    }
+
+    /**
+     * Create a PR that installs or updates the .devcontainer directory.
+     *
+     * Fails if the devcontainer is already up to date.
+     *
+     * ## OPTIONS
+     *
+     * [--branch=<branch>]
+     * : Target branch for the PR. Defaults to the repository's default branch.
+     *
+     * [--yes]
+     * : Skip the confirmation prompt.
+     *
+     * ## EXAMPLES
+     *
+     *     wp mighty-backup devcontainer update
+     *     wp mighty-backup devcontainer update --branch=develop
+     *     wp mighty-backup devcontainer update --yes
+     *
+     * @param array $args       Positional arguments.
+     * @param array $assoc_args Named arguments.
+     */
+    public function update( $args, $assoc_args ) {
+        $branch = $assoc_args['branch'] ?? '';
+
+        $target_label = $branch !== '' ? $branch : 'the repository default branch';
+        WP_CLI::confirm( sprintf( 'Create a PR to update .devcontainer (base: %s)?', $target_label ), $assoc_args );
+
+        try {
+            $manager = new Mighty_Devcontainer_Manager( new Mighty_Backup_Settings() );
+            $result  = $manager->install_or_update( $branch );
+        } catch ( \Exception $e ) {
+            WP_CLI::error( $e->getMessage() );
+        }
+
+        WP_CLI::success( 'Pull request created.' );
+        WP_CLI::log( sprintf( 'Branch: %s', $result['branch'] ) );
+        WP_CLI::log( sprintf( 'PR URL: %s', $result['pr_url'] ) );
     }
 }

@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.5.0
+Stable tag: 2.6.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,13 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.6.0 =
+* Fixed DigitalOcean Spaces secret key not saving on initial save (double-sanitization bug when option did not yet exist) — same fix applied to the GitHub PAT
+* Added target-branch selector for devcontainer update PRs — branches are fetched from GitHub during version check and presented as a dropdown (defaulting to the repo's default branch)
+* Added `wp mighty-backup settings list|get|set` WP-CLI commands for managing all plugin settings from the command line, with transparent encryption of the DO Spaces secret and GitHub PAT and masked output unless `--show-secret(s)` is passed
+* Added `wp mighty-backup api-key generate|show|delete` WP-CLI commands for managing the Codespace bootstrap API key (`bm_backup_api_key`) from the command line
+* Added `wp mighty-backup devcontainer check|update` WP-CLI commands for checking the .devcontainer version and creating update PRs (with `--branch` targeting and `--yes` for unattended runs)
 
 = 2.5.0 =
 * Fixed backups hanging at "waiting for background processing" in both admin UI and WP-CLI

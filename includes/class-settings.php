@@ -12,6 +12,33 @@ class Mighty_Backup_Settings {
     const OPTION_KEY = 'bm_backup_settings';
 
     /**
+     * Metadata for all writable settings keys.
+     *
+     * Keys are the CLI/user-facing names. Encrypted fields use the plaintext
+     * name (e.g. 'spaces_secret_key') here; the actual storage key is in the
+     * 'storage' field (e.g. 'spaces_secret_key_enc').
+     */
+    private const KEY_META = [
+        'spaces_access_key'  => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'spaces_access_key' ],
+        'spaces_secret_key'  => [ 'type' => 'string', 'encrypted' => true,  'storage' => 'spaces_secret_key_enc' ],
+        'spaces_endpoint'    => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'spaces_endpoint' ],
+        'spaces_bucket'      => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'spaces_bucket' ],
+        'client_path'        => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'client_path' ],
+        'hosting_provider'   => [ 'type' => 'enum',   'enum' => [ '', 'pressable', 'generic' ], 'storage' => 'hosting_provider' ],
+        'schedule_frequency' => [ 'type' => 'enum',   'enum' => [ 'daily', 'twicedaily', 'weekly' ], 'storage' => 'schedule_frequency' ],
+        'schedule_time'      => [ 'type' => 'time',   'storage' => 'schedule_time' ],
+        'schedule_day'       => [ 'type' => 'enum',   'enum' => [ 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday' ], 'storage' => 'schedule_day' ],
+        'retention_count'    => [ 'type' => 'int',    'min' => 1, 'storage' => 'retention_count' ],
+        'extra_exclusions'   => [ 'type' => 'text',   'storage' => 'extra_exclusions' ],
+        'notify_on_failure'  => [ 'type' => 'bool',   'storage' => 'notify_on_failure' ],
+        'notification_email' => [ 'type' => 'email',  'storage' => 'notification_email' ],
+        'streamlined_mode'   => [ 'type' => 'bool',   'storage' => 'streamlined_mode' ],
+        'github_owner'       => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'github_owner' ],
+        'github_repo'        => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'github_repo' ],
+        'github_pat'         => [ 'type' => 'string', 'encrypted' => true,  'storage' => 'github_pat_enc' ],
+    ];
+
+    /**
      * Check whether the current user is authorized to manage plugin settings.
      */
     private function is_authorized_user(): bool {
@@ -296,6 +323,182 @@ class Mighty_Backup_Settings {
             return '';
         }
         return $this->decrypt( $encrypted );
+    }
+
+    /**
+     * Return the list of writable settings keys (CLI/user-facing names).
+     *
+     * @return string[]
+     */
+    public function get_writable_keys(): array {
+        return array_keys( self::KEY_META );
+    }
+
+    /**
+     * Set a single setting value by its CLI/user-facing key.
+     *
+     * Handles type coercion, validation, and encryption for encrypted fields.
+     *
+     * @param string $key   User-facing key (see KEY_META).
+     * @param string $value Raw string value from the CLI.
+     * @throws \InvalidArgumentException If the key is unknown or the value fails validation.
+     * @throws \RuntimeException         If encryption fails for an encrypted field.
+     */
+    public function set_value( string $key, string $value ): void {
+        if ( ! isset( self::KEY_META[ $key ] ) ) {
+            throw new \InvalidArgumentException(
+                sprintf( 'Unknown setting "%s". Valid keys: %s', $key, implode( ', ', $this->get_writable_keys() ) )
+            );
+        }
+
+        $meta    = self::KEY_META[ $key ];
+        $storage = $meta['storage'];
+        $coerced = $this->coerce_value( $key, $value, $meta );
+
+        // Encrypt if this is an encrypted field.
+        if ( ! empty( $meta['encrypted'] ) ) {
+            // An empty value would silently wipe the credential — reject it explicitly.
+            if ( $coerced === '' ) {
+                throw new \InvalidArgumentException(
+                    sprintf( 'Refusing to store empty value for encrypted field "%s".', $key )
+                );
+            }
+            $coerced = $this->encrypt( $coerced );
+        }
+
+        $all             = $this->get_all();
+        $all[ $storage ] = $coerced;
+        $this->save_all( $all );
+    }
+
+    /**
+     * Get a single setting value by its CLI/user-facing key.
+     *
+     * For encrypted keys, returns the masked placeholder unless $reveal is true.
+     *
+     * @param string $key    User-facing key.
+     * @param bool   $reveal If true, decrypt encrypted fields; otherwise mask them.
+     * @return string
+     * @throws \InvalidArgumentException If the key is unknown.
+     */
+    public function get_value( string $key, bool $reveal = false ): string {
+        if ( ! isset( self::KEY_META[ $key ] ) ) {
+            throw new \InvalidArgumentException(
+                sprintf( 'Unknown setting "%s".', $key )
+            );
+        }
+
+        $meta = self::KEY_META[ $key ];
+
+        if ( ! empty( $meta['encrypted'] ) ) {
+            // Encrypted field — check storage, then either mask or decrypt.
+            $encrypted = $this->get( $meta['storage'] );
+            if ( empty( $encrypted ) ) {
+                return '';
+            }
+            if ( ! $reveal ) {
+                return '••••••••';
+            }
+            return $key === 'spaces_secret_key' ? $this->get_secret_key() : $this->get_github_pat();
+        }
+
+        $raw = $this->get( $meta['storage'] );
+
+        // Render booleans consistently.
+        if ( $meta['type'] === 'bool' ) {
+            return $raw ? '1' : '0';
+        }
+
+        return (string) $raw;
+    }
+
+    /**
+     * Return all writable settings as an associative array for CLI display.
+     *
+     * @param bool $reveal If true, decrypt encrypted fields; otherwise mask them.
+     * @return array<string, string>
+     */
+    public function get_all_display( bool $reveal = false ): array {
+        $out = [];
+        foreach ( $this->get_writable_keys() as $key ) {
+            $out[ $key ] = $this->get_value( $key, $reveal );
+        }
+        return $out;
+    }
+
+    /**
+     * Coerce and validate a raw string value against the key's declared type.
+     *
+     * @param string $key   User-facing key (for error messages).
+     * @param string $value Raw string value.
+     * @param array  $meta  Metadata entry from KEY_META.
+     * @return string|int|bool Coerced value ready for storage (or encryption).
+     * @throws \InvalidArgumentException If the value is invalid for the declared type.
+     */
+    private function coerce_value( string $key, string $value, array $meta ) {
+        $type = $meta['type'];
+
+        switch ( $type ) {
+            case 'bool':
+                $truthy = [ '1', 'true', 'yes', 'on' ];
+                $falsey = [ '0', 'false', 'no', 'off', '' ];
+                $lower  = strtolower( trim( $value ) );
+                if ( in_array( $lower, $truthy, true ) ) {
+                    return true;
+                }
+                if ( in_array( $lower, $falsey, true ) ) {
+                    return false;
+                }
+                throw new \InvalidArgumentException(
+                    sprintf( 'Invalid boolean value "%s" for "%s". Use 1/0, true/false, yes/no, or on/off.', $value, $key )
+                );
+
+            case 'int':
+                if ( ! preg_match( '/^-?\d+$/', trim( $value ) ) ) {
+                    throw new \InvalidArgumentException(
+                        sprintf( 'Invalid integer value "%s" for "%s".', $value, $key )
+                    );
+                }
+                $int = (int) $value;
+                if ( isset( $meta['min'] ) && $int < $meta['min'] ) {
+                    throw new \InvalidArgumentException(
+                        sprintf( 'Value for "%s" must be >= %d.', $key, $meta['min'] )
+                    );
+                }
+                return $int;
+
+            case 'enum':
+                if ( ! in_array( $value, $meta['enum'], true ) ) {
+                    throw new \InvalidArgumentException(
+                        sprintf( 'Invalid value "%s" for "%s". Allowed: %s', $value, $key, implode( ', ', $meta['enum'] ) )
+                    );
+                }
+                return $value;
+
+            case 'time':
+                if ( ! preg_match( '/^\d{2}:\d{2}$/', $value ) ) {
+                    throw new \InvalidArgumentException(
+                        sprintf( 'Invalid time "%s" for "%s". Expected HH:MM format.', $value, $key )
+                    );
+                }
+                return $value;
+
+            case 'email':
+                $trimmed = trim( $value );
+                if ( $trimmed !== '' && ! is_email( $trimmed ) ) {
+                    throw new \InvalidArgumentException(
+                        sprintf( 'Invalid email "%s" for "%s".', $value, $key )
+                    );
+                }
+                return sanitize_email( $trimmed );
+
+            case 'text':
+                return sanitize_textarea_field( $value );
+
+            case 'string':
+            default:
+                return sanitize_text_field( $value );
+        }
     }
 
     /**
