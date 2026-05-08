@@ -716,6 +716,13 @@
                     $result.removeClass('loading').addClass('success').html(
                         'Secret ' + verb + ' (' + d.secret_name + ' in ' + d.owner + '/' + d.repo + '). ' + link
                     );
+                    // Refresh the "Last synced" line immediately so the operator
+                    // sees confirmation without reloading. The next page load
+                    // will replace "just now" with the server-rendered
+                    // human_time_diff value.
+                    $('#mb-push-secret-status').html(
+                        'Last synced to <code>' + d.owner + '/' + d.repo + '</code> · just now'
+                    );
                 } else {
                     $result.removeClass('loading').addClass('error').text(response.data);
                 }

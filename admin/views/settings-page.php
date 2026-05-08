@@ -242,6 +242,42 @@ $recent    = $logger->get_recent( 20 );
                                value="<?php echo esc_attr( $settings['retention_count'] ); ?>"
                                min="1" max="365" class="small-text" />
                         <p class="description"><?php esc_html_e( 'Number of backups to retain. Older backups are automatically deleted.', 'mighty-backup' ); ?></p>
+                        <?php
+                        $last_retention = get_site_option( Mighty_Backup_Scheduler::LAST_RETENTION_RUN );
+                        if ( is_array( $last_retention ) && ! empty( $last_retention['timestamp'] ) ) :
+                            $when = human_time_diff( (int) $last_retention['timestamp'], time() );
+                            if ( ! empty( $last_retention['error'] ) ) : ?>
+                                <p class="description" style="color:#b32d2e;">
+                                    <?php
+                                    /* translators: 1: human-readable time difference, 2: error message */
+                                    printf(
+                                        esc_html__( 'Retention last attempted %1$s ago and failed: %2$s', 'mighty-backup' ),
+                                        esc_html( $when ),
+                                        esc_html( $last_retention['error'] )
+                                    );
+                                    ?>
+                                </p>
+                            <?php else : ?>
+                                <p class="description">
+                                    <?php
+                                    $deleted = (int) ( $last_retention['databases_deleted'] ?? 0 )
+                                             + (int) ( $last_retention['files_deleted'] ?? 0 );
+                                    /* translators: 1: human-readable time difference, 2: number of files deleted */
+                                    printf(
+                                        esc_html( _n(
+                                            'Retention last ran %1$s ago — deleted %2$d backup file.',
+                                            'Retention last ran %1$s ago — deleted %2$d backup files.',
+                                            $deleted,
+                                            'mighty-backup'
+                                        ) ),
+                                        esc_html( $when ),
+                                        $deleted
+                                    );
+                                    ?>
+                                </p>
+                            <?php endif;
+                        endif;
+                        ?>
                     </td>
                 </tr>
             </table>
@@ -349,7 +385,6 @@ $recent    = $logger->get_recent( 20 );
                                name="bm_backup_settings[github_pat]"
                                value="<?php echo ! empty( $settings['github_pat_enc'] ) ? '••••••••' : ''; ?>"
                                class="regular-text" autocomplete="new-password" />
-                        <button type="button" class="mb-toggle-password" data-target="bm_github_pat"><?php esc_html_e( 'Show', 'mighty-backup' ); ?></button>
                         <p class="description"><?php esc_html_e( 'Leave blank to keep the current token. Requires "repo" scope for private repositories.', 'mighty-backup' ); ?></p>
                     </td>
                 </tr>
@@ -553,6 +588,21 @@ $recent    = $logger->get_recent( 20 );
                         <?php esc_html_e( 'Push as Codespaces Secret', 'mighty-backup' ); ?>
                     </button>
                     <span id="mb-push-secret-result" class="mb-result-message" aria-live="polite"></span>
+                    <p id="mb-push-secret-status" class="description">
+                        <?php
+                        $last_push = get_site_option( Mighty_Devcontainer_Manager::LAST_PUSH_OPTION );
+                        if ( is_array( $last_push ) && ! empty( $last_push['timestamp'] ) ) :
+                            $when = human_time_diff( (int) $last_push['timestamp'], time() );
+                            $repo = trim( ( $last_push['owner'] ?? '' ) . '/' . ( $last_push['repo'] ?? '' ), '/' );
+                            /* translators: 1: GitHub owner/repo, 2: human-readable time difference */
+                            printf(
+                                esc_html__( 'Last synced to %1$s · %2$s ago', 'mighty-backup' ),
+                                '<code>' . esc_html( $repo ) . '</code>',
+                                esc_html( $when )
+                            );
+                        endif;
+                        ?>
+                    </p>
                     <p class="description">
                         <?php esc_html_e( 'Pushes this key directly to the configured GitHub repo as the', 'mighty-backup' ); ?>
                         <code>BM_BOOTSTRAP_KEY</code>

@@ -22,12 +22,12 @@ wp plugin install https://github.com/builtmighty/mighty-backup/releases/latest/d
 - **DigitalOcean Spaces storage** — multipart uploads with retry and resume
 - **Streamlined Mode** — lighter database exports that filter WooCommerce orders to the last 90 days and export log tables as structure only
 - **Live backup log** — real-time progress display with timestamped entries during backup
-- **Retention management** — automatically prunes old backups beyond a configurable limit
+- **Retention management** — automatically prunes old backups beyond a configurable limit; runs both at the end of every successful backup *and* via an independent daily cron (`mighty_backup_retention`) so a streak of failed nightly backups can never accumulate orphaned objects on Spaces
 - **Backup history** — logs every backup with status, sizes, and errors
 - **Email notifications** — alerts on backup failure
 - **Dev Mode detection** — prevents dev/staging sites from overwriting production backups
 - **Codespace integration** — REST API endpoint and bootstrap key for the pipeline
-- **Devcontainer management** — check and update .devcontainer config via GitHub API with automatic Codespace tier sizing (with 20% headroom) based on site disk usage; creates resize PRs when a site outgrows its current tier; target branch is selectable from a dropdown of the repo's branches (defaults to the repo's default branch)
+- **Devcontainer management** — check and update .devcontainer config via GitHub API with automatic Codespace tier sizing (4 → 8 → 16 → 32-core, up to 256 GB) based on site disk usage with 20% headroom; creates resize PRs when a site outgrows its current tier; target branch is selectable from a dropdown of the repo's branches (defaults to the repo's default branch)
 - **Self-driving backup processing** — backup steps are processed directly during admin UI polling and WP-CLI execution, with no dependency on WP-Cron or Action Scheduler's async dispatcher
 - **WP-CLI support** — full command-line interface with timeout control
 - **Automatic updates** — auto-updates from GitHub releases via built-in update checker
@@ -214,6 +214,11 @@ The push is silent and best-effort — failures are logged via the live
 backup log and never block the originating action. To push manually (or to
 override the secret name / target), use `wp mighty-backup api-key push-secret`.
 
+The Codespace settings tab shows a "Last synced to {owner}/{repo} · N ago"
+line under the **Push as Codespaces Secret** button, sourced from the most
+recent successful push (manual or automatic). The line updates immediately
+after a successful push without requiring a page reload.
+
 ## Developer Hooks & Filters
 
 ### Filters
@@ -293,7 +298,7 @@ Backups are executed as a chain of background steps via Action Scheduler:
 3. **Archive Files** — create a `tar.gz` archive (shell `tar` preferred, streaming PHP fallback); symlinked plugins are dereferenced and included. On hosts where `WP_CONTENT_DIR` is outside `ABSPATH` (e.g., Pressable), both locations are archived automatically. Files that change during archival (caches, sessions, logs) are handled gracefully — tar exit code 1 is logged as a non-fatal warning.
 4. **Upload Database** — multipart upload to Spaces (25 MB parts, 5 concurrent)
 5. **Upload Files** — multipart upload to Spaces
-6. **Cleanup** — run retention policy, delete temp files, mark complete
+6. **Cleanup** — run retention policy, delete temp files, mark complete. An independent daily cron (`mighty_backup_retention`) also prunes Spaces regardless of whether a backup completed, so old objects can't accumulate when nightly backups are failing.
 
 Each step runs independently to avoid timeout issues on resource-constrained hosts.
 

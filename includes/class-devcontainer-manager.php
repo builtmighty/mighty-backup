@@ -18,6 +18,8 @@ class Mighty_Devcontainer_Manager {
 	private const GLOBAL_REF   = 'main';
 	private const API_BASE     = 'https://api.github.com';
 
+	public const LAST_PUSH_OPTION = 'bm_last_bootstrap_secret_push';
+
 	private Mighty_Backup_Settings $settings;
 
 	public function __construct( Mighty_Backup_Settings $settings ) {
@@ -207,7 +209,7 @@ class Mighty_Devcontainer_Manager {
 	}
 
 	/**
-	 * Show an admin warning on the settings page when the site exceeds 128 GB.
+	 * Show an admin warning on the settings page when the site exceeds 256 GB.
 	 */
 	public function maybe_show_size_warning(): void {
 		// Only show on the Mighty Backup settings page.
@@ -226,7 +228,7 @@ class Mighty_Devcontainer_Manager {
 		}
 
 		$disk_size = (int) $disk_size;
-		$max_bytes = 128 * 1024 * 1024 * 1024; // 128 GB.
+		$max_bytes = 256 * 1024 * 1024 * 1024; // 256 GB.
 
 		if ( $disk_size <= $max_bytes ) {
 			return;
@@ -237,7 +239,7 @@ class Mighty_Devcontainer_Manager {
 			esc_html__( 'Mighty Backup: Site Too Large for Codespaces', 'mighty-backup' ),
 			sprintf(
 				/* translators: %s: human-readable site size */
-				esc_html__( 'This site is %s (excluding uploads), which exceeds the 128 GB GitHub Codespace limit. The devcontainer has been configured with the maximum resources, but the Codespace may not have enough disk space.', 'mighty-backup' ),
+				esc_html__( 'This site is %s (excluding uploads), which exceeds the 256 GB GitHub Codespace limit. The devcontainer has been configured with the maximum resources, but the Codespace may not have enough disk space.', 'mighty-backup' ),
 				esc_html( size_format( $disk_size ) )
 			)
 		);
@@ -289,7 +291,7 @@ class Mighty_Devcontainer_Manager {
 			$disk_size        = $this->calculate_site_disk_size();
 			set_transient( 'mighty_backup_site_disk_size', $disk_size, DAY_IN_SECONDS );
 			$tier             = $this->get_codespace_tier( $disk_size );
-			$recommended_cpus = $tier ? $tier['cpus'] : 16;
+			$recommended_cpus = $tier ? $tier['cpus'] : 32;
 			$current_cpus     = $this->extract_cpus_from_contents( $repo_file );
 			$size_ok          = $current_cpus !== null && $current_cpus >= $recommended_cpus;
 
@@ -481,11 +483,11 @@ class Mighty_Devcontainer_Manager {
 
 		if ( $disk_size > 0 ) {
 			$human_size = size_format( $disk_size );
-			$cpus       = $tier ? $tier['cpus'] : 16;
+			$cpus       = $tier ? $tier['cpus'] : 32;
 			if ( $tier ) {
 				$pr_body .= "- Configured for **{$cpus}-core** Codespace. Site size: {$human_size}.\n";
 			} else {
-				$pr_body .= "- **Warning:** Site size is {$human_size} (excluding uploads), which exceeds the 128 GB Codespace limit. Configured with maximum resources ({$cpus}-core).\n";
+				$pr_body .= "- **Warning:** Site size is {$human_size} (excluding uploads), which exceeds the 256 GB Codespace limit. Configured with maximum resources ({$cpus}-core).\n";
 			}
 		}
 
@@ -523,7 +525,7 @@ class Mighty_Devcontainer_Manager {
 
 		$disk_size = $this->calculate_site_disk_size();
 		$tier      = $this->get_codespace_tier( $disk_size );
-		$cpus      = $tier ? $tier['cpus'] : 16;
+		$cpus      = $tier ? $tier['cpus'] : 32;
 
 		set_transient( 'mighty_backup_site_disk_size', $disk_size, DAY_IN_SECONDS );
 
@@ -730,8 +732,8 @@ class Mighty_Devcontainer_Manager {
 			return $this->copy_blob_to_repo( $sha, $owner, $repo );
 		}
 
-		// Use the provided tier, or max tier as fallback for >128 GB sites.
-		$host_tier = $tier ?? [ 'cpus' => 16 ];
+		// Use the provided tier, or max tier as fallback for >256 GB sites.
+		$host_tier = $tier ?? [ 'cpus' => 32 ];
 
 		// Patch only the cpus field — preserve any other hostRequirements
 		// keys (memory, storage, etc.) that the template may declare.
@@ -756,27 +758,46 @@ class Mighty_Devcontainer_Manager {
 	/**
 	 * Calculate the total disk size of the site, excluding the uploads directory.
 	 *
-	 * @return int Size in bytes, or 0 if the calculation fails.
+	 * Unreadable subtrees and individual files that fail stat are skipped (the
+	 * walker uses CATCH_GET_CHILD plus a per-entry try/catch) so a single
+	 * permission error mid-walk doesn't abandon the whole calculation. If the
+	 * site root itself can't be read, the failure is surfaced as a
+	 * RuntimeException rather than silently returning 0 — that prevents the
+	 * caller from configuring the smallest tier in response to an error.
+	 *
+	 * @return int Size in bytes (may slightly under-count if some subtrees were
+	 *             unreadable; never returns a phantom 0).
+	 * @throws \RuntimeException If the site root cannot be opened for reading.
 	 */
 	private function calculate_site_disk_size(): int {
+		$root       = rtrim( ABSPATH, '/' );
+		$upload_dir = wp_upload_dir( null, false );
+		$uploads    = isset( $upload_dir['basedir'] ) ? rtrim( $upload_dir['basedir'], '/' ) : '';
+
 		try {
-			$root       = rtrim( ABSPATH, '/' );
-			$upload_dir = wp_upload_dir( null, false );
-			$uploads    = isset( $upload_dir['basedir'] ) ? rtrim( $upload_dir['basedir'], '/' ) : '';
-
-			$total = 0;
-
 			$iterator = new \RecursiveDirectoryIterator(
 				$root,
 				\RecursiveDirectoryIterator::SKIP_DOTS
 			);
-
-			$files = new \RecursiveIteratorIterator(
-				$iterator,
-				\RecursiveIteratorIterator::LEAVES_ONLY
+		} catch ( \Throwable $e ) {
+			throw new \RuntimeException(
+				'Could not read site root for disk-size calculation: ' . $e->getMessage()
 			);
+		}
 
-			foreach ( $files as $file ) {
+		// CATCH_GET_CHILD makes the recursive walker skip subdirectories it
+		// cannot descend into (permission denied, vanished mid-walk, etc.)
+		// instead of aborting the entire iteration.
+		$files = new \RecursiveIteratorIterator(
+			$iterator,
+			\RecursiveIteratorIterator::LEAVES_ONLY,
+			\RecursiveIteratorIterator::CATCH_GET_CHILD
+		);
+
+		$total = 0;
+
+		foreach ( $files as $file ) {
+			try {
 				if ( ! $file->isFile() ) {
 					continue;
 				}
@@ -787,12 +808,14 @@ class Mighty_Devcontainer_Manager {
 				}
 
 				$total += $file->getSize();
+			} catch ( \Throwable $e ) {
+				// Skip individual files we can't stat. Better to under-count by
+				// a few unreadable files than abandon the whole walk.
+				continue;
 			}
-
-			return $total;
-		} catch ( \Throwable $e ) {
-			return 0;
 		}
+
+		return $total;
 	}
 
 	/**
@@ -801,11 +824,11 @@ class Mighty_Devcontainer_Manager {
 	 * Includes 20% headroom so the Codespace has breathing room for
 	 * runtime artifacts, package caches, and temporary files.
 	 *
-	 * Tiers: 4-core = 32 GB, 8-core = 64 GB, 16-core = 128 GB.
+	 * Tiers: 4-core = 32 GB, 8-core = 64 GB, 16-core = 128 GB, 32-core = 256 GB.
 	 * Only cpus is set in hostRequirements — disk walks hand-in-hand.
 	 *
 	 * @param int $disk_bytes Site disk size in bytes.
-	 * @return array{cpus: int}|null Tier info, or null if the site exceeds 128 GB.
+	 * @return array{cpus: int}|null Tier info, or null if the site exceeds 256 GB.
 	 */
 	private function get_codespace_tier( int $disk_bytes ): ?array {
 		$gb            = 1024 * 1024 * 1024;
@@ -819,6 +842,9 @@ class Mighty_Devcontainer_Manager {
 		}
 		if ( $with_headroom <= 128 * $gb ) {
 			return [ 'cpus' => 16 ];
+		}
+		if ( $with_headroom <= 256 * $gb ) {
+			return [ 'cpus' => 32 ];
 		}
 
 		return null;
@@ -845,16 +871,19 @@ class Mighty_Devcontainer_Manager {
 	/**
 	 * Map a CPU count to the corresponding disk size in GB.
 	 *
-	 * 4-core = 32 GB, 8-core = 64 GB, 16-core = 128 GB.
+	 * Mirrors GitHub's standardLinux machine types: 2-core = 32 GB,
+	 * 4-core = 32 GB, 8-core = 64 GB, 16-core = 128 GB, 32-core = 256 GB.
 	 *
 	 * @param int $cpus CPU count.
 	 * @return int Disk size in GB.
 	 */
 	private function cpus_to_disk_gb( int $cpus ): int {
 		return match ( $cpus ) {
+			2  => 32,
 			4  => 32,
 			8  => 64,
 			16 => 128,
+			32 => 256,
 			default => $cpus * 8,
 		};
 	}
@@ -939,7 +968,7 @@ class Mighty_Devcontainer_Manager {
 			'key_id'          => $pk_response['key_id'],
 		] );
 
-		return [
+		$payload = [
 			'owner'       => $config['owner'],
 			'repo'        => $config['repo'],
 			'secret_name' => $secret_name,
@@ -952,6 +981,14 @@ class Mighty_Devcontainer_Manager {
 				$type
 			),
 		];
+
+		// Persist the last-synced metadata so the admin UI can show
+		// "Last synced to {repo} {N min ago}" without re-querying GitHub.
+		// Stored on success only — a failed push leaves the previous
+		// successful timestamp intact (which is what operators want to see).
+		update_site_option( self::LAST_PUSH_OPTION, [ 'timestamp' => time() ] + $payload );
+
+		return $payload;
 	}
 
 	/**

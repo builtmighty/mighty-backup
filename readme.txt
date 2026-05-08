@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.9.0
+Stable tag: 2.10.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,15 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.10.0 =
+* Added independent daily retention cron (`mighty_backup_retention`) — decouples cleanup from backup success so a streak of failed nightly backups can no longer let old objects accumulate on Spaces; the in-chain `step_cleanup` is preserved as the optimal "right after a fresh backup" prune
+* Added "Retention last ran" diagnostic line on the Schedule tab — shows when retention last fired and how many database/file backups were removed (or the error message if it failed)
+* Added "Last synced" status under the "Push as Codespaces Secret" button — persists owner/repo/timestamp from the most recent successful push (manual or auto) and renders via `human_time_diff()`; updates immediately on successful push without a page reload
+* Added 32-core / 256 GB GitHub Codespaces tier to the devcontainer sizing logic — sites with raw size between 107 GB and 213 GB now correctly map to 32-core instead of falling back to a 16-core warning; size warning threshold raised accordingly
+* Fixed `calculate_site_disk_size()` silently returning 0 (and thus selecting the smallest 4-core tier) when the iterator hit any unreadable subdirectory — the recursive walker now uses `CATCH_GET_CHILD` to skip unreadable subtrees, per-entry stat errors are caught individually, and root-inaccessibility surfaces as a `RuntimeException` instead of a phantom 0
+* Fixed `cpus_to_disk_gb()` mapping for 2-core (now correctly reports 32 GB instead of 16 GB) and added explicit 32-core (256 GB) arm — only affects PR-body disk-size hints, but no longer misleads
+* Removed the show/reveal toggle from the GitHub PAT field — the token now stays masked at all times (DO Spaces Access Key and Secret Key fields keep their toggles)
 
 = 2.9.0 =
 * Fixed `wpdb::placeholder_escape()` corruption at the source — the PHP database export path now strips `{<64-hex>}` placeholder tokens from every row before writing, so backups created from sites with `%` characters in user data no longer bake the session hash into the dump
