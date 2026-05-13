@@ -257,7 +257,7 @@ class Mighty_Backup_Manager {
 
             $this->advance( $state );
 
-        } catch ( \Exception $e ) {
+        } catch ( \Throwable $e ) {
             // Clean up raw temp file on failure.
             if ( isset( $state['db_export']['raw_path'] ) && file_exists( $state['db_export']['raw_path'] ) ) {
                 @unlink( $state['db_export']['raw_path'] );
@@ -296,7 +296,7 @@ class Mighty_Backup_Manager {
 
             $this->advance( $state );
 
-        } catch ( \Exception $e ) {
+        } catch ( \Throwable $e ) {
             $this->fail( $state, 'File archive failed: ' . $e->getMessage() );
         }
     }
@@ -336,7 +336,7 @@ class Mighty_Backup_Manager {
 
             $this->advance( $state );
 
-        } catch ( \Exception $e ) {
+        } catch ( \Throwable $e ) {
             $this->fail( $state, 'Database upload failed: ' . $e->getMessage() );
         }
     }
@@ -376,7 +376,7 @@ class Mighty_Backup_Manager {
 
             $this->advance( $state );
 
-        } catch ( \Exception $e ) {
+        } catch ( \Throwable $e ) {
             $this->fail( $state, 'Files upload failed: ' . $e->getMessage() );
         }
     }

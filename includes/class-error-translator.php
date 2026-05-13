@@ -221,6 +221,36 @@ class Mighty_Backup_Error_Translator {
                 'settings_anchor' => null,
             ],
             [
+                'match'           => '/Could not open file for archival/i',
+                'human'           => 'A file could not be opened during archive creation.',
+                'suggestion'      => 'is_readable() returned true but fopen() failed — usually a permissions race, a broken symlink, or a file locked by another process (e.g. a mysqldump rotation). The backup was aborted to prevent shipping a corrupted archive. Check the live log for the exact file path, then re-run.',
+                'settings_anchor' => null,
+            ],
+            [
+                'match'           => '/Short read on .+ header declared/i',
+                'human'           => 'A file was truncated mid-archive.',
+                'suggestion'      => 'The file shrank between the size check and the read (commonly happens with log files or session files being written by another process). The backup was aborted to prevent a desynced archive. Add the offending path to extra_exclusions if it\'s expected.',
+                'settings_anchor' => null,
+            ],
+            [
+                'match'           => '/Size mismatch for .+ header declared/i',
+                'human'           => 'A file changed size during archival.',
+                'suggestion'      => 'A live file (cache, log, session) was being written while the backup ran. Add it to extra_exclusions, or re-run the backup at a quieter time.',
+                'settings_anchor' => null,
+            ],
+            [
+                'match'           => '/Post-archive verification failed/i',
+                'human'           => 'The archive failed its structural self-check.',
+                'suggestion'      => 'The tar.gz was produced but tar can\'t parse it cleanly. This means a header/data desync slipped through — re-run the backup; if it keeps failing on the same file, exclude that file or escalate to engineering.',
+                'settings_anchor' => null,
+            ],
+            [
+                'match'           => '/gzwrite failed/i',
+                'human'           => 'Writing the archive to disk failed mid-stream.',
+                'suggestion'      => 'Almost always disk-full or a zlib-level I/O error. Free space on the system temp directory and re-run.',
+                'settings_anchor' => null,
+            ],
+            [
                 'match'           => '/Permission denied/i',
                 'human'           => 'The plugin could not read a file or write to the temp directory (permission denied).',
                 'suggestion'      => 'Check that the PHP process can read everything under wp-content and write to the system temp directory.',

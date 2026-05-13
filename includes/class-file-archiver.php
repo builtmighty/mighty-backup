@@ -82,7 +82,122 @@ class Mighty_Backup_File_Archiver {
             throw new \Exception( 'Archive creation failed — output file is empty.' );
         }
 
+        // Final guard: walk the tar structure end-to-end. Catches header/data
+        // desync bugs that would otherwise ship a "successful" but unusable
+        // backup (see plans/scan-over-this-plugin-merry-hoare.md).
+        $this->verify_archive_structure( $output_path );
+
         return $size;
+    }
+
+    /**
+     * Walk the tar.gz structure end-to-end and throw if anything is off.
+     *
+     * Prefers shell `tar -tzf` when available (most accurate). Falls back to
+     * a streaming gzip+tar header walker that follows the declared size of
+     * each entry and confirms the stream ends with the two zero-block EOF
+     * terminator.
+     */
+    private function verify_archive_structure( string $path ): void {
+        Mighty_Backup_Log_Stream::add( 'Verifying archive structure...' );
+
+        if ( $this->can_use_shell_tar() ) {
+            $escaped = escapeshellarg( $path );
+            $out     = [];
+            $code    = 0;
+            exec( "tar -tzf {$escaped} > /dev/null 2>&1", $out, $code );
+            if ( $code !== 0 ) {
+                throw new \RuntimeException( sprintf(
+                    'Post-archive verification failed: tar -tzf returned exit %d. '
+                    . 'The archive is structurally invalid — refusing to upload.',
+                    $code
+                ) );
+            }
+            Mighty_Backup_Log_Stream::add( 'Archive verified.' );
+            return;
+        }
+
+        $this->verify_archive_structure_php( $path );
+        Mighty_Backup_Log_Stream::add( 'Archive verified.' );
+    }
+
+    /**
+     * PHP fallback: walk the gzip stream block-by-block. Confirms each tar
+     * header has a parseable size field and the stream ends with two zero
+     * blocks (the standard tar end-of-archive terminator).
+     *
+     * Skipping data regions uses `gzseek( ..., SEEK_CUR )` which is O(size)
+     * because zlib has no real seek — but verification is one pass per
+     * backup, so the cost is acceptable.
+     */
+    private function verify_archive_structure_php( string $path ): void {
+        $gz = @gzopen( $path, 'rb' );
+        if ( ! $gz ) {
+            throw new \RuntimeException( 'Post-archive verification failed: cannot reopen archive for reading.' );
+        }
+
+        $zero_block = str_repeat( "\0", 512 );
+
+        try {
+            while ( true ) {
+                $header = gzread( $gz, 512 );
+                if ( $header === false || strlen( $header ) === 0 ) {
+                    // Reached the end without finding the EOF terminator pair.
+                    throw new \RuntimeException(
+                        'Post-archive verification failed: stream ended without an EOF terminator (missing two trailing zero blocks).'
+                    );
+                }
+
+                if ( strlen( $header ) < 512 ) {
+                    throw new \RuntimeException( sprintf(
+                        'Post-archive verification failed: short read at header boundary (got %d bytes, expected 512). Archive is truncated.',
+                        strlen( $header )
+                    ) );
+                }
+
+                if ( $header === $zero_block ) {
+                    $next = gzread( $gz, 512 );
+                    if ( $next === $zero_block ) {
+                        return; // Valid EOF terminator.
+                    }
+                    throw new \RuntimeException(
+                        'Post-archive verification failed: single zero block found where two were expected — archive is desynced.'
+                    );
+                }
+
+                // Parse the size field (offset 124, 12 bytes, octal, null-terminated).
+                $size_field = substr( $header, 124, 12 );
+                $size_octal = trim( $size_field, "\0 " );
+                if ( $size_octal === '' || ! preg_match( '/^[0-7]+$/', $size_octal ) ) {
+                    throw new \RuntimeException( sprintf(
+                        'Post-archive verification failed: header has invalid size field (raw: %s). Archive is desynced.',
+                        bin2hex( $size_field )
+                    ) );
+                }
+                $declared_size = octdec( $size_octal );
+
+                // Skip over the declared data region (rounded up to 512 boundary).
+                $skip = (int) ( ceil( $declared_size / 512 ) * 512 );
+                if ( $skip > 0 ) {
+                    // gzseek returns 0 on success.
+                    if ( gzseek( $gz, $skip, SEEK_CUR ) !== 0 ) {
+                        throw new \RuntimeException(
+                            'Post-archive verification failed: cannot seek over declared data region (archive truncated or zlib error).'
+                        );
+                    }
+                    // Confirm the seek didn't run off the end. zlib's gzseek
+                    // returns 0 even when EOF was hit, so we re-check via
+                    // gzeof + a single peek.
+                    if ( gzeof( $gz ) ) {
+                        throw new \RuntimeException(
+                            'Post-archive verification failed: declared data region extends past end of stream. Archive is desynced (e.g. header announced N bytes but fewer were written).'
+                        );
+                    }
+                }
+            }
+        } finally {
+            gzclose( $gz );
+        }
     }
 
     /**
@@ -115,7 +230,7 @@ class Mighty_Backup_File_Archiver {
             $this->stream_directory( $gz, $content_dir, 'wp-content', $exclusions, $visited_dirs );
 
             // End-of-archive: two consecutive 512-byte zero blocks.
-            gzwrite( $gz, str_repeat( "\0", 1024 ) );
+            $this->safe_gzwrite( $gz, str_repeat( "\0", 1024 ) );
 
         } finally {
             gzclose( $gz );
@@ -192,7 +307,7 @@ class Mighty_Backup_File_Archiver {
             $this->stream_directory( $gz, $wp_root, '', $exclusions, $visited_dirs );
 
             // End-of-archive: two consecutive 512-byte zero blocks.
-            gzwrite( $gz, str_repeat( "\0", 1024 ) );
+            $this->safe_gzwrite( $gz, str_repeat( "\0", 1024 ) );
 
         } finally {
             gzclose( $gz );
@@ -267,7 +382,7 @@ class Mighty_Backup_File_Archiver {
 
             if ( $file->isDir() ) {
                 // Directory entry: trailing slash, zero size, typeflag '5'.
-                gzwrite( $gz, $this->build_tar_header( $archive_path . '/', 0, $file->getMTime(), $file->getPerms(), '5' ) );
+                $this->safe_gzwrite( $gz, $this->build_tar_header( $archive_path . '/', 0, $file->getMTime(), $file->getPerms(), '5' ) );
 
             } elseif ( $file->isFile() && $file->isReadable() ) {
                 $size = $file->getSize();
@@ -278,26 +393,90 @@ class Mighty_Backup_File_Archiver {
                     continue;
                 }
 
-                gzwrite( $gz, $this->build_tar_header( $archive_path, $size, $file->getMTime(), $file->getPerms(), '0' ) );
+                $source = $file->getRealPath() ?: $file->getPathname();
+                // Suppress the E_WARNING so a permission-denied surface as our
+                // own clearer exception instead of an admin notice.
+                $fh = @fopen( $source, 'rb' );
 
-                // Stream file contents in 64 KB chunks directly into gzip.
-                $fh = fopen( $file->getRealPath() ?: $file->getPathname(), 'rb' );
-                if ( $fh ) {
+                if ( ! $fh ) {
+                    // We have NOT written the header yet, so the archive is
+                    // still internally consistent. Abort loud — silently
+                    // emitting a header we cannot back with data would
+                    // desync every later entry in the tar.
+                    throw new \RuntimeException( sprintf(
+                        'Could not open file for archival: %s (is_readable() returned true, fopen() failed). '
+                        . 'Aborting to prevent archive desync.',
+                        $archive_path
+                    ) );
+                }
+
+                $this->safe_gzwrite( $gz, $this->build_tar_header( $archive_path, $size, $file->getMTime(), $file->getPerms(), '0' ) );
+
+                $written = 0;
+                try {
                     while ( ! feof( $fh ) ) {
                         $chunk = fread( $fh, 65536 );
-                        if ( $chunk !== false ) {
-                            gzwrite( $gz, $chunk );
+                        if ( $chunk === false ) {
+                            throw new \RuntimeException( sprintf(
+                                'fread failed on %s after %d of %d bytes',
+                                $archive_path,
+                                $written,
+                                $size
+                            ) );
                         }
+                        if ( $chunk === '' ) {
+                            // Defensive: avoid infinite loops if feof somehow
+                            // stays false while reads return empty.
+                            break;
+                        }
+                        $this->safe_gzwrite( $gz, $chunk );
+                        $written += strlen( $chunk );
                     }
+                } finally {
                     fclose( $fh );
                 }
 
-                // Pad data region to the next 512-byte boundary.
+                if ( $written !== $size ) {
+                    throw new \RuntimeException( sprintf(
+                        'Short read on %s — header declared %d bytes, wrote %d. '
+                        . 'Aborting to prevent archive desync (file may have been '
+                        . 'truncated mid-archive).',
+                        $archive_path,
+                        $size,
+                        $written
+                    ) );
+                }
+
+                // Pad data region to the next 512-byte boundary. Safe to use
+                // declared size here since we verified actual bytes == declared.
                 $padding = ( 512 - ( $size % 512 ) ) % 512;
                 if ( $padding > 0 ) {
-                    gzwrite( $gz, str_repeat( "\0", $padding ) );
+                    $this->safe_gzwrite( $gz, str_repeat( "\0", $padding ) );
                 }
             }
+        }
+    }
+
+    /**
+     * Write to a gzip stream, throwing on short writes / failure.
+     *
+     * PHP's gzwrite() returns the number of UNCOMPRESSED bytes written, or
+     * false on failure. Both partial writes and failures must abort the
+     * archive — silent short writes desync the tar stream the same way a
+     * missing data region does.
+     */
+    private function safe_gzwrite( $gz, string $data ): void {
+        $len = strlen( $data );
+        if ( $len === 0 ) {
+            return;
+        }
+        $written = gzwrite( $gz, $data );
+        if ( $written === false || $written !== $len ) {
+            throw new \RuntimeException( sprintf(
+                'gzwrite failed: wrote %s of %d bytes (disk full or zlib error)',
+                $written === false ? 'false' : (string) $written,
+                $len
+            ) );
         }
     }
 
