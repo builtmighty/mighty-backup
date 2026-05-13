@@ -111,6 +111,83 @@ class Mighty_Backup_Logger {
     }
 
     /**
+     * Filtered, paginated query of log entries.
+     *
+     * Accepts:
+     *   - status   ('completed'|'failed'|'running'|'' for any)
+     *   - type     ('full'|'db'|'files'|'')
+     *   - trigger  ('scheduled'|'manual'|'cli'|'')
+     *   - after    (YYYY-MM-DD inclusive lower bound on started_at)
+     *   - before   (YYYY-MM-DD inclusive upper bound on started_at)
+     *   - paged    (1-based page number)
+     *   - per_page (rows per page, capped at 200)
+     *
+     * @return array{items: array, total: int, paged: int, per_page: int, total_pages: int}
+     */
+    public function query( array $args = [] ): array {
+        global $wpdb;
+
+        $defaults = [
+            'status'   => '',
+            'type'     => '',
+            'trigger'  => '',
+            'after'    => '',
+            'before'   => '',
+            'paged'    => 1,
+            'per_page' => 20,
+        ];
+        $args = array_merge( $defaults, $args );
+
+        $args['paged']    = max( 1, (int) $args['paged'] );
+        $args['per_page'] = max( 1, min( 200, (int) $args['per_page'] ) );
+
+        $where     = [];
+        $params    = [];
+        $allowed   = [
+            'status'  => [ 'completed', 'failed', 'running' ],
+            'type'    => [ 'full', 'db', 'files' ],
+            'trigger' => [ 'scheduled', 'manual', 'cli' ],
+        ];
+
+        foreach ( $allowed as $key => $valid ) {
+            if ( $args[ $key ] !== '' && in_array( $args[ $key ], $valid, true ) ) {
+                $where[]  = "{$key} = %s";
+                $params[] = $args[ $key ];
+            }
+        }
+
+        if ( $args['after'] !== '' && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $args['after'] ) ) {
+            $where[]  = 'started_at >= %s';
+            $params[] = $args['after'] . ' 00:00:00';
+        }
+        if ( $args['before'] !== '' && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $args['before'] ) ) {
+            $where[]  = 'started_at <= %s';
+            $params[] = $args['before'] . ' 23:59:59';
+        }
+
+        $table     = $this->get_table_name();
+        $where_sql = $where ? ' WHERE ' . implode( ' AND ', $where ) : '';
+
+        $count_query = "SELECT COUNT(*) FROM {$table}{$where_sql}";
+        $total       = (int) ( $params
+            ? $wpdb->get_var( $wpdb->prepare( $count_query, $params ) )
+            : $wpdb->get_var( $count_query ) );
+
+        $offset       = ( $args['paged'] - 1 ) * $args['per_page'];
+        $list_query   = "SELECT * FROM {$table}{$where_sql} ORDER BY started_at DESC LIMIT %d OFFSET %d";
+        $list_params  = array_merge( $params, [ $args['per_page'], $offset ] );
+        $items        = $wpdb->get_results( $wpdb->prepare( $list_query, $list_params ), ARRAY_A ) ?: [];
+
+        return [
+            'items'       => $items,
+            'total'       => $total,
+            'paged'       => $args['paged'],
+            'per_page'    => $args['per_page'],
+            'total_pages' => (int) ceil( $total / $args['per_page'] ),
+        ];
+    }
+
+    /**
      * Get the most recent completed backup.
      */
     public function get_last_completed(): ?array {
@@ -130,5 +207,61 @@ class Mighty_Backup_Logger {
         global $wpdb;
         $table = $this->get_table_name();
         return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
+    }
+
+    /**
+     * Look up entries by primary key.
+     *
+     * Filters out rows whose status is "running" so callers cannot delete a
+     * backup that is still in progress.
+     *
+     * @param int[] $ids
+     * @return array<int, array> Indexed by id.
+     */
+    public function get_by_ids( array $ids ): array {
+        global $wpdb;
+        $ids = array_values( array_unique( array_filter( array_map( 'intval', $ids ) ) ) );
+        if ( ! $ids ) {
+            return [];
+        }
+        $table        = $this->get_table_name();
+        $placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+        $rows         = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT * FROM {$table} WHERE id IN ({$placeholders}) AND status != 'running'",
+                $ids
+            ),
+            ARRAY_A
+        ) ?: [];
+
+        $out = [];
+        foreach ( $rows as $row ) {
+            $out[ (int) $row['id'] ] = $row;
+        }
+        return $out;
+    }
+
+    /**
+     * Delete entries by primary key.
+     *
+     * @param int[] $ids
+     * @return int Rows actually deleted.
+     */
+    public function delete_by_ids( array $ids ): int {
+        global $wpdb;
+        $ids = array_values( array_unique( array_filter( array_map( 'intval', $ids ) ) ) );
+        if ( ! $ids ) {
+            return 0;
+        }
+        $table        = $this->get_table_name();
+        $placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+
+        // Belt-and-suspenders: never delete a running row even if a caller passes it in.
+        return (int) $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$table} WHERE id IN ({$placeholders}) AND status != 'running'",
+                $ids
+            )
+        );
     }
 }

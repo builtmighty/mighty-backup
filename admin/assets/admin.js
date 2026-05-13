@@ -10,6 +10,27 @@
     var stepLabels = ['Starting', 'Exporting DB', 'Archiving Files', 'Uploading DB', 'Uploading Files', 'Cleanup'];
     var stepKeys = ['start', 'export_db', 'archive_files', 'upload_db', 'upload_files', 'cleanup'];
 
+    // --- Onboarding Wizard ---
+
+    $(document).on('click', '.mb-onboarding-step-link', function (e) {
+        e.preventDefault();
+        var tab = $(this).data('tab');
+        if (tab) switchTab(tab);
+        // Smooth-scroll to the top of the page so the user actually sees the
+        // tab they were just sent to.
+        $('html, body').animate({ scrollTop: 0 }, 200);
+    });
+
+    $(document).on('click', '.mb-onboarding-dismiss', function () {
+        var $wizard = $(this).closest('.mb-onboarding');
+        $.post(mightyBackup.ajaxUrl, {
+            action: 'mighty_backup_dismiss_onboarding',
+            nonce: mightyBackup.nonce,
+        }).done(function () {
+            $wizard.slideUp(180, function () { $wizard.remove(); });
+        });
+    });
+
     // --- Tabs ---
 
     function initTabs() {
@@ -61,6 +82,98 @@
             $('#mb-modal').hide();
             if (modalResolve) modalResolve(false);
             modalResolve = null;
+        }
+    });
+
+    // --- Help Tooltips ---
+
+    // A single popover element is shared across every help icon. Clicking an
+    // icon repositions and refills it; clicking outside or pressing Escape
+    // dismisses it.
+    var $helpPopover = null;
+    var $helpAnchor = null;
+
+    function ensureHelpPopover() {
+        if ($helpPopover && $helpPopover.length) return;
+        $helpPopover = $(
+            '<div class="mb-help-tooltip" role="tooltip" aria-hidden="true">' +
+            '  <div class="mb-help-tooltip-arrow" aria-hidden="true"></div>' +
+            '  <div class="mb-help-tooltip-body"></div>' +
+            '</div>'
+        ).appendTo(document.body).hide();
+    }
+
+    function positionHelpPopover($btn) {
+        var offset = $btn.offset();
+        var btnW = $btn.outerWidth();
+        var btnH = $btn.outerHeight();
+        var popW = $helpPopover.outerWidth();
+        var viewportW = $(window).width();
+        var scrollX = $(window).scrollLeft();
+
+        // Try to align tooltip's center under the button. Shift left if it
+        // would overflow the right edge.
+        var preferredLeft = offset.left + (btnW / 2) - (popW / 2);
+        var maxLeft = scrollX + viewportW - popW - 8;
+        var minLeft = scrollX + 8;
+        var left = Math.max(minLeft, Math.min(preferredLeft, maxLeft));
+
+        var top = offset.top + btnH + 6;
+
+        $helpPopover.css({ left: left, top: top });
+
+        // Arrow points at the button center even when the body has shifted.
+        var arrowLeft = (offset.left + btnW / 2) - left;
+        $helpPopover.find('.mb-help-tooltip-arrow').css('left', arrowLeft - 6);
+    }
+
+    function showHelpPopover($btn) {
+        ensureHelpPopover();
+        var text = $btn.data('mb-help') || $btn.attr('data-mb-help') || '';
+        $helpPopover.find('.mb-help-tooltip-body').text(text);
+        $helpAnchor = $btn;
+        var ariaId = 'mb-help-' + Math.floor(Math.random() * 1e9);
+        $helpPopover.attr('id', ariaId).attr('aria-hidden', 'false').show();
+        $btn.attr('aria-describedby', ariaId).attr('aria-expanded', 'true');
+        positionHelpPopover($btn);
+    }
+
+    function hideHelpPopover() {
+        if (!$helpPopover) return;
+        $helpPopover.hide().attr('aria-hidden', 'true');
+        if ($helpAnchor) {
+            $helpAnchor.removeAttr('aria-describedby').removeAttr('aria-expanded');
+            $helpAnchor = null;
+        }
+    }
+
+    $(document).on('click', '.mb-help-icon', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var $btn = $(this);
+        if ($helpAnchor && $helpAnchor[0] === $btn[0] && $helpPopover.is(':visible')) {
+            hideHelpPopover();
+            return;
+        }
+        showHelpPopover($btn);
+    });
+
+    $(document).on('click', function (e) {
+        if (!$helpPopover || !$helpPopover.is(':visible')) return;
+        if ($(e.target).closest('.mb-help-tooltip, .mb-help-icon').length) return;
+        hideHelpPopover();
+    });
+
+    $(document).on('keydown', function (e) {
+        if (e.key === 'Escape' && $helpPopover && $helpPopover.is(':visible')) {
+            hideHelpPopover();
+            if ($helpAnchor) $helpAnchor.trigger('focus');
+        }
+    });
+
+    $(window).on('resize scroll', function () {
+        if ($helpAnchor && $helpPopover && $helpPopover.is(':visible')) {
+            positionHelpPopover($helpAnchor);
         }
     });
 
@@ -144,11 +257,11 @@
             if (response.success) {
                 showResultTimed($result, 'success', response.data, 4000);
             } else {
-                $result.removeClass('loading').addClass('error').text(response.data);
+                renderResult($result, 'error', response.data);
             }
         })
         .fail(function () {
-            $result.removeClass('loading').addClass('error').text('Request failed.');
+            renderResult($result, 'error', 'Request failed.');
         })
         .always(function () {
             $btn.prop('disabled', false);
@@ -283,7 +396,11 @@
 
                 } else if (s.status === 'failed') {
                     hideProgress();
-                    showResult('error', 'Backup failed: ' + (s.error || 'Unknown error'));
+                    if (s.error_translated && typeof s.error_translated === 'object') {
+                        showResult('error', s.error_translated);
+                    } else {
+                        showResult('error', 'Backup failed: ' + (s.error || 'Unknown error'));
+                    }
                     dismissStatus();
                     $('#mb-run-backup').removeClass('running').prop('disabled', false);
 
@@ -298,7 +415,44 @@
             // Still active.
             $('#mb-cancel-backup').show();
             showProgress(s.message || 'Running...', s.progress || 0, s.current_step || '');
+            renderLiveProgress(s.live_progress);
         });
+    }
+
+    function renderLiveProgress(payload) {
+        var $box = $('#mb-progress-box');
+        if (!$box.length) return;
+
+        var $line = $box.find('.mb-live-progress');
+        if (!payload || typeof payload !== 'object') {
+            $line.remove();
+            return;
+        }
+
+        if (!$line.length) {
+            $line = $('<div class="mb-live-progress" aria-live="polite"></div>');
+            $box.find('.mb-progress-text').after($line);
+        }
+
+        var text = payload.message || '';
+        if (typeof payload.percent === 'number') {
+            text += ' (' + payload.percent + '%)';
+        }
+        if (typeof payload.eta === 'number' && payload.eta > 0) {
+            text += ' · ~' + formatDuration(payload.eta) + ' remaining';
+        }
+        $line.text(text);
+    }
+
+    function formatDuration(seconds) {
+        seconds = Math.max(0, Math.floor(seconds));
+        if (seconds < 60) return seconds + 's';
+        var mins = Math.floor(seconds / 60);
+        var secs = seconds % 60;
+        if (mins < 60) return mins + 'm ' + secs + 's';
+        var hrs = Math.floor(mins / 60);
+        mins = mins % 60;
+        return hrs + 'h ' + mins + 'm';
     }
 
     function dismissStatus() {
@@ -365,6 +519,7 @@
         $box.find('.mb-progress-bar').css('width', '0');
         $box.find('.mb-step').removeClass('mb-step-active mb-step-done');
         $box.find('.mb-log-box').empty();
+        $box.find('.mb-live-progress').remove();
         lastLogIndex = 0;
     }
 
@@ -419,11 +574,37 @@
 
     // --- Result Messages ---
 
-    function showResult(type, message) {
-        var $el = $('#mb-backup-result');
-        $el.removeClass('success error loading');
+    // Render a result message that may be a plain string OR a translated
+    // error object: { human, raw, suggestion, settings_anchor }. The DOM
+    // is rebuilt either way so previous content (text or rich HTML) is replaced.
+    function renderResult($el, type, payload) {
+        $el.removeClass('success error loading').empty();
         if (type) $el.addClass(type);
-        $el.text(message);
+
+        if (payload && typeof payload === 'object' && typeof payload.human === 'string') {
+            var $human = $('<span class="mb-result-human"></span>').text(payload.human);
+            $el.append($human);
+            if (payload.suggestion) {
+                $el.append($('<span class="mb-result-suggestion"></span>').text(payload.suggestion));
+            }
+            if (payload.raw && payload.raw !== payload.human) {
+                var $toggle = $('<a href="#" class="mb-result-raw-toggle"></a>').text('Show raw error');
+                var $raw = $('<code class="mb-result-raw"></code>').text(payload.raw).hide();
+                $toggle.on('click', function (e) {
+                    e.preventDefault();
+                    var hidden = !$raw.is(':visible');
+                    $raw.toggle(hidden);
+                    $(this).text(hidden ? 'Hide raw error' : 'Show raw error');
+                });
+                $el.append($toggle).append($raw);
+            }
+        } else {
+            $el.text(payload == null ? '' : String(payload));
+        }
+    }
+
+    function showResult(type, message) {
+        renderResult($('#mb-backup-result'), type, message);
     }
 
     function autoDismissResult(ms) {
@@ -433,9 +614,9 @@
     }
 
     function showResultTimed($el, type, message, ms) {
-        $el.removeClass('success error loading').addClass(type).text(message);
+        renderResult($el, type, message);
         setTimeout(function () {
-            $el.removeClass(type).text('');
+            $el.removeClass(type).empty();
         }, ms || 4000);
     }
 
@@ -565,13 +746,118 @@
         });
     });
 
+    // --- Backup History: Bulk Delete ---
+
+    // Header checkbox toggles every visible row checkbox.
+    $(document).on('change', '#mb-history-check-all', function () {
+        var checked = $(this).is(':checked');
+        $('.mb-history-row-check').prop('checked', checked);
+    });
+
+    // Sync header state when individual rows change.
+    $(document).on('change', '.mb-history-row-check', function () {
+        var $all = $('.mb-history-row-check');
+        var $checked = $all.filter(':checked');
+        $('#mb-history-check-all').prop('checked', $all.length > 0 && $checked.length === $all.length);
+    });
+
+    function bulkDeleteIds(ids) {
+        var $result = $('#mb-bulk-result');
+        if (!ids.length) {
+            renderResult($result, 'error', 'No backups selected.');
+            return;
+        }
+
+        mbConfirm('Permanently delete ' + ids.length + ' backup' + (ids.length === 1 ? '' : 's') + '? This removes them from history AND from DigitalOcean Spaces.').then(function (confirmed) {
+            if (!confirmed) return;
+
+            renderResult($result, 'loading', 'Deleting ' + ids.length + ' backup' + (ids.length === 1 ? '' : 's') + '...');
+
+            // Chunk requests to avoid PHP timeouts on huge selections.
+            var chunkSize = 50;
+            var chunks = [];
+            for (var i = 0; i < ids.length; i += chunkSize) {
+                chunks.push(ids.slice(i, i + chunkSize));
+            }
+
+            var totalDeleted = 0;
+            var totalSkipped = 0;
+            var remoteErrors = [];
+
+            function next(index) {
+                if (index >= chunks.length) {
+                    var msg = 'Deleted ' + totalDeleted + ' backup' + (totalDeleted === 1 ? '' : 's') + '.';
+                    if (totalSkipped) msg += ' Skipped ' + totalSkipped + ' running.';
+                    if (remoteErrors.length) {
+                        renderResult($result, 'error', {
+                            human: msg + ' Some Spaces objects could not be removed.',
+                            raw: remoteErrors.join('\n'),
+                            suggestion: 'History rows were still deleted. Re-run from the Storage tab\'s Test Connection to verify your credentials.',
+                        });
+                    } else {
+                        renderResult($result, 'success', msg);
+                    }
+                    // Reload so the table reflects the new state + new totals.
+                    setTimeout(function () { location.reload(); }, 1500);
+                    return;
+                }
+
+                $.post(mightyBackup.ajaxUrl, {
+                    action: 'mighty_backup_bulk_delete',
+                    nonce: mightyBackup.bulkDeleteNonce,
+                    log_ids: chunks[index],
+                })
+                .done(function (response) {
+                    if (response.success) {
+                        totalDeleted += response.data.deleted_rows || 0;
+                        totalSkipped += response.data.skipped_running || 0;
+                        if (response.data.remote_errors && response.data.remote_errors.length) {
+                            remoteErrors = remoteErrors.concat(response.data.remote_errors);
+                        }
+                        next(index + 1);
+                    } else {
+                        renderResult($result, 'error', response.data);
+                    }
+                })
+                .fail(function () {
+                    renderResult($result, 'error', 'Request failed during chunk ' + (index + 1) + ' of ' + chunks.length + '.');
+                });
+            }
+
+            next(0);
+        });
+    }
+
+    $(document).on('click', '#mb-bulk-apply', function () {
+        var action = $('#mb-bulk-action').val();
+        if (!action) return;
+
+        var ids = [];
+        if (action === 'delete') {
+            $('.mb-history-row-check:checked').each(function () {
+                ids.push(parseInt($(this).val(), 10));
+            });
+        } else if (action === 'delete-failed') {
+            $('.mb-history-table tr[data-status="failed"]').each(function () {
+                ids.push(parseInt($(this).data('log-id'), 10));
+            });
+        }
+        ids = ids.filter(function (v) { return !isNaN(v) && v > 0; });
+        bulkDeleteIds(ids);
+    });
+
     // --- Expandable Error Messages ---
 
     $(document).on('click', '.mb-error-toggle', function (e) {
         e.preventDefault();
         var $cell = $(this).closest('.mb-error-cell');
+        var mode = $(this).data('mode');
         $cell.toggleClass('expanded');
-        $(this).text($cell.hasClass('expanded') ? 'Show less' : 'Show more');
+        if (mode === 'raw') {
+            $(this).text($cell.hasClass('expanded') ? 'Hide raw error' : 'Show raw error');
+        } else {
+            $(this).text($cell.hasClass('expanded') ? 'Show less' : 'Show more');
+        }
     });
 
     // --- Exit Dev Mode ---
@@ -620,7 +906,7 @@
         })
         .done(function (response) {
             if (!response.success) {
-                $status.removeClass('loading').addClass('error').text(response.data);
+                renderResult($status, 'error', response.data);
                 return;
             }
 
@@ -681,12 +967,12 @@
                         'PR created! <a href="' + response.data.pr_url + '" target="_blank" rel="noopener">View Pull Request</a>'
                     );
                 } else {
-                    $result.removeClass('loading').addClass('error').text(response.data);
+                    renderResult($result, 'error', response.data);
                     $btn.prop('disabled', false);
                 }
             })
             .fail(function () {
-                $result.removeClass('loading').addClass('error').text('Request failed.');
+                renderResult($result, 'error', 'Request failed.');
                 $btn.prop('disabled', false);
             });
         });
@@ -724,11 +1010,11 @@
                         'Last synced to <code>' + d.owner + '/' + d.repo + '</code> · just now'
                     );
                 } else {
-                    $result.removeClass('loading').addClass('error').text(response.data);
+                    renderResult($result, 'error', response.data);
                 }
             })
             .fail(function () {
-                $result.removeClass('loading').addClass('error').text('Request failed.');
+                renderResult($result, 'error', 'Request failed.');
             })
             .always(function () {
                 $btn.prop('disabled', false);
@@ -765,6 +1051,7 @@
                 $('#mb-run-backup').addClass('running').prop('disabled', true);
                 $('#mb-cancel-backup').show();
                 showProgress(response.data.message, response.data.progress, response.data.current_step);
+                renderLiveProgress(response.data.live_progress);
 
                 // Load existing log entries.
                 if (response.data.log_entries && response.data.log_entries.length > 0) {

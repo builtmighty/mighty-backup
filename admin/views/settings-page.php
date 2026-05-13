@@ -11,11 +11,26 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-$logger    = new Mighty_Backup_Logger();
-$scheduler = new Mighty_Backup_Scheduler();
-$last      = $logger->get_last_completed();
-$next_run  = $scheduler->get_next_run();
-$recent    = $logger->get_recent( 20 );
+$logger             = new Mighty_Backup_Logger();
+$scheduler          = new Mighty_Backup_Scheduler();
+$last               = $logger->get_last_completed();
+$next_run           = $scheduler->get_next_run();
+$settings_obj       = new Mighty_Backup_Settings();
+$show_onboarding    = $settings_obj->needs_onboarding();
+$onboarding_steps   = $show_onboarding ? $settings_obj->get_onboarding_steps() : [];
+
+$history_filters = [
+    'status'   => isset( $_GET['bm_status'] )  ? sanitize_text_field( wp_unslash( $_GET['bm_status']  ) ) : '',
+    'type'     => isset( $_GET['bm_type'] )    ? sanitize_text_field( wp_unslash( $_GET['bm_type']    ) ) : '',
+    'trigger'  => isset( $_GET['bm_trigger'] ) ? sanitize_text_field( wp_unslash( $_GET['bm_trigger'] ) ) : '',
+    'after'    => isset( $_GET['bm_after'] )   ? sanitize_text_field( wp_unslash( $_GET['bm_after']   ) ) : '',
+    'before'   => isset( $_GET['bm_before'] )  ? sanitize_text_field( wp_unslash( $_GET['bm_before']  ) ) : '',
+    'paged'    => isset( $_GET['bm_paged'] )   ? max( 1, (int) $_GET['bm_paged'] ) : 1,
+    'per_page' => 20,
+];
+$history_has_filters = ( $history_filters['status'] || $history_filters['type'] || $history_filters['trigger'] || $history_filters['after'] || $history_filters['before'] );
+$history_result      = $logger->query( $history_filters );
+$recent              = $history_result['items'];
 ?>
 
 <div class="wrap mb-backup-wrap">
@@ -56,6 +71,10 @@ $recent    = $logger->get_recent( 20 );
         <div class="notice notice-error is-dismissible">
             <p><?php echo esc_html( urldecode( $_GET['error'] ) ); ?></p>
         </div>
+    <?php endif; ?>
+
+    <?php if ( $show_onboarding ) : ?>
+        <?php include MIGHTY_BACKUP_DIR . 'admin/views/onboarding-wizard.php'; ?>
     <?php endif; ?>
 
     <!-- Tabs -->
@@ -109,6 +128,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_spaces_endpoint"><?php esc_html_e( 'Endpoint', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'Region-specific host for DigitalOcean Spaces (e.g. nyc3.digitaloceanspaces.com, sfo3.digitaloceanspaces.com). Must match the region the bucket was created in.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <input type="text" id="bm_spaces_endpoint"
@@ -132,6 +152,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_client_path"><?php esc_html_e( 'GitHub Repository', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'The repo slug is used as the Spaces path prefix so each client\'s backups live in their own folder under the bucket. You can paste the full GitHub URL — the plugin extracts the slug automatically.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <input type="text" id="bm_client_path"
@@ -145,6 +166,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_hosting_provider"><?php esc_html_e( 'Hosting Provider', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'Selects the migration path the Codespace bootstrap pipeline uses when pushing changes back to production. Pressable uses their REST API; Generic uses SFTP. Leave blank if you don\'t plan to push from Codespaces.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <select id="bm_hosting_provider" name="bm_backup_settings[hosting_provider]">
@@ -182,6 +204,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_schedule_frequency"><?php esc_html_e( 'Frequency', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'How often automatic backups run. WP-Cron drives the schedule, so the site must receive at least one request per scheduled window. For unattended sites, configure a real system cron — see the Time hint below.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <select id="bm_schedule_frequency" name="bm_backup_settings[schedule_frequency]">
@@ -235,6 +258,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_retention_count"><?php esc_html_e( 'Keep Last N Backups', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'Retention runs after every successful backup AND once a day on its own cron. That means a streak of failing backups can\'t leave orphaned objects accumulating on Spaces — old backups are pruned regardless.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <input type="number" id="bm_retention_count"
@@ -285,7 +309,10 @@ $recent    = $logger->get_recent( 20 );
             <h2><?php esc_html_e( 'Database Export', 'mighty-backup' ); ?></h2>
             <table class="form-table">
                 <tr>
-                    <th scope="row"><?php esc_html_e( 'Streamlined Mode', 'mighty-backup' ); ?></th>
+                    <th scope="row">
+                        <?php esc_html_e( 'Streamlined Mode', 'mighty-backup' ); ?>
+                        <?php mighty_backup_help_icon( __( 'Skips data from log-shaped tables (actionscheduler_*, wc_session, etc.) and trims WooCommerce orders to the last 90 days. Schema is preserved. Useful for development environments where full history isn\'t needed — backup is much smaller and faster.', 'mighty-backup' ) ); ?>
+                    </th>
                     <td>
                         <label>
                             <input type="checkbox" name="bm_backup_settings[streamlined_mode]" value="1"
@@ -304,6 +331,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_extra_exclusions"><?php esc_html_e( 'Additional Exclude Patterns', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'One path pattern per line, relative to the WordPress root. Defaults already exclude uploads, caches, .git, node_modules, and known backup-plugin directories. Add patterns here for client-specific paths you want left out of file archives.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <textarea id="bm_extra_exclusions"
@@ -319,7 +347,10 @@ $recent    = $logger->get_recent( 20 );
             <h2><?php esc_html_e( 'Notifications', 'mighty-backup' ); ?></h2>
             <table class="form-table">
                 <tr>
-                    <th scope="row"><?php esc_html_e( 'Email on Failure', 'mighty-backup' ); ?></th>
+                    <th scope="row">
+                        <?php esc_html_e( 'Email on Failure', 'mighty-backup' ); ?>
+                        <?php mighty_backup_help_icon( __( 'Email is the only notification channel — Mighty Backup deliberately does not surface a dashboard widget, admin bar dot, or Slack/Discord/Teams webhook. Use the site\'s configured mailer.', 'mighty-backup' ) ); ?>
+                    </th>
                     <td>
                         <label>
                             <input type="checkbox" name="bm_backup_settings[notify_on_failure]" value="1"
@@ -353,6 +384,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_github_owner"><?php esc_html_e( 'GitHub Owner', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'The GitHub user or organization that owns the repo. Defaults to "builtmighty" if blank. Required for devcontainer install/update and the auto-push of BM_BOOTSTRAP_KEY.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <input type="text" id="bm_github_owner"
@@ -366,6 +398,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_github_repo"><?php esc_html_e( 'Repository Slug', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'Just the repo name (not the full URL). Defaults to the GitHub Repository setting on the Storage tab if left blank — there\'s rarely a reason to set both.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <input type="text" id="bm_github_repo"
@@ -379,6 +412,7 @@ $recent    = $logger->get_recent( 20 );
                 <tr>
                     <th scope="row">
                         <label for="bm_github_pat"><?php esc_html_e( 'Personal Access Token', 'mighty-backup' ); ?></label>
+                        <?php mighty_backup_help_icon( __( 'Required scopes: "repo" for the devcontainer PR, plus "codespaces:secrets" if you want this plugin to push BM_BOOTSTRAP_KEY automatically. Stored AES-256-CBC encrypted. Leave blank to keep the existing token.', 'mighty-backup' ) ); ?>
                     </th>
                     <td>
                         <input type="password" id="bm_github_pat"
@@ -455,10 +489,79 @@ $recent    = $logger->get_recent( 20 );
         <!-- Backup History -->
         <hr />
         <h2><?php esc_html_e( 'Backup History', 'mighty-backup' ); ?></h2>
+
+        <form method="get" class="mb-history-filters">
+            <input type="hidden" name="page" value="mighty-backup" />
+
+            <select name="bm_status" aria-label="<?php esc_attr_e( 'Status', 'mighty-backup' ); ?>">
+                <option value=""><?php esc_html_e( 'All statuses', 'mighty-backup' ); ?></option>
+                <?php foreach ( [ 'completed', 'failed', 'running' ] as $opt ) : ?>
+                    <option value="<?php echo esc_attr( $opt ); ?>" <?php selected( $history_filters['status'], $opt ); ?>>
+                        <?php echo esc_html( ucfirst( $opt ) ); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <select name="bm_type" aria-label="<?php esc_attr_e( 'Type', 'mighty-backup' ); ?>">
+                <option value=""><?php esc_html_e( 'All types', 'mighty-backup' ); ?></option>
+                <?php foreach ( [ 'full', 'db', 'files' ] as $opt ) : ?>
+                    <option value="<?php echo esc_attr( $opt ); ?>" <?php selected( $history_filters['type'], $opt ); ?>>
+                        <?php echo esc_html( ucfirst( $opt ) ); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <select name="bm_trigger" aria-label="<?php esc_attr_e( 'Trigger', 'mighty-backup' ); ?>">
+                <option value=""><?php esc_html_e( 'All triggers', 'mighty-backup' ); ?></option>
+                <?php foreach ( [ 'scheduled', 'manual', 'cli' ] as $opt ) : ?>
+                    <option value="<?php echo esc_attr( $opt ); ?>" <?php selected( $history_filters['trigger'], $opt ); ?>>
+                        <?php echo esc_html( ucfirst( $opt ) ); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <label class="mb-history-date-label">
+                <?php esc_html_e( 'From', 'mighty-backup' ); ?>
+                <input type="date" name="bm_after" value="<?php echo esc_attr( $history_filters['after'] ); ?>" />
+            </label>
+            <label class="mb-history-date-label">
+                <?php esc_html_e( 'To', 'mighty-backup' ); ?>
+                <input type="date" name="bm_before" value="<?php echo esc_attr( $history_filters['before'] ); ?>" />
+            </label>
+
+            <button type="submit" class="button"><?php esc_html_e( 'Filter', 'mighty-backup' ); ?></button>
+
+            <?php if ( $history_has_filters ) : ?>
+                <a href="<?php echo esc_url( remove_query_arg( [ 'bm_status', 'bm_type', 'bm_trigger', 'bm_after', 'bm_before', 'bm_paged' ] ) ); ?>" class="mb-history-clear">
+                    <?php esc_html_e( 'Clear', 'mighty-backup' ); ?>
+                </a>
+            <?php endif; ?>
+
+            <span class="mb-history-count">
+                <?php
+                /* translators: %d: total number of matching backup history entries */
+                printf( esc_html__( '%d entries', 'mighty-backup' ), (int) $history_result['total'] );
+                ?>
+            </span>
+        </form>
+
         <?php if ( ! empty( $recent ) ) : ?>
-            <table class="widefat striped">
+            <div class="mb-history-bulk tablenav top">
+                <select id="mb-bulk-action" aria-label="<?php esc_attr_e( 'Bulk action', 'mighty-backup' ); ?>">
+                    <option value=""><?php esc_html_e( 'Bulk actions', 'mighty-backup' ); ?></option>
+                    <option value="delete"><?php esc_html_e( 'Delete selected (from history + Spaces)', 'mighty-backup' ); ?></option>
+                    <option value="delete-failed"><?php esc_html_e( 'Delete all failed (this page)', 'mighty-backup' ); ?></option>
+                </select>
+                <button type="button" id="mb-bulk-apply" class="button"><?php esc_html_e( 'Apply', 'mighty-backup' ); ?></button>
+                <span id="mb-bulk-result" class="mb-result-message" aria-live="polite"></span>
+            </div>
+
+            <table class="widefat striped mb-history-table">
                 <thead>
                     <tr>
+                        <th class="mb-history-check check-column">
+                            <input type="checkbox" id="mb-history-check-all" aria-label="<?php esc_attr_e( 'Select all', 'mighty-backup' ); ?>" />
+                        </th>
                         <th><?php esc_html_e( 'Date', 'mighty-backup' ); ?></th>
                         <th><?php esc_html_e( 'Type', 'mighty-backup' ); ?></th>
                         <th><?php esc_html_e( 'Trigger', 'mighty-backup' ); ?></th>
@@ -470,8 +573,15 @@ $recent    = $logger->get_recent( 20 );
                     </tr>
                 </thead>
                 <tbody>
-                    <?php foreach ( $recent as $entry ) : ?>
-                        <tr>
+                    <?php foreach ( $recent as $entry ) :
+                        $is_running = ( $entry['status'] === 'running' );
+                        ?>
+                        <tr data-log-id="<?php echo esc_attr( (int) $entry['id'] ); ?>" data-status="<?php echo esc_attr( $entry['status'] ); ?>">
+                            <td class="mb-history-check check-column">
+                                <?php if ( ! $is_running ) : ?>
+                                    <input type="checkbox" class="mb-history-row-check" value="<?php echo esc_attr( (int) $entry['id'] ); ?>" aria-label="<?php esc_attr_e( 'Select backup', 'mighty-backup' ); ?>" />
+                                <?php endif; ?>
+                            </td>
                             <td><?php echo esc_html( $entry['started_at'] ); ?></td>
                             <td><?php echo esc_html( $entry['backup_type'] ); ?></td>
                             <td><?php echo esc_html( $entry['trigger_type'] ); ?></td>
@@ -484,13 +594,25 @@ $recent    = $logger->get_recent( 20 );
                             <td><?php echo $entry['files_file_size'] ? esc_html( size_format( $entry['files_file_size'] ) ) : '&mdash;'; ?></td>
                             <td class="mb-error-cell">
                                 <?php if ( $entry['error_message'] ) :
-                                    $word_count = str_word_count( $entry['error_message'] );
-                                    if ( $word_count > 15 ) : ?>
-                                        <span class="mb-error-short"><?php echo esc_html( wp_trim_words( $entry['error_message'], 15 ) ); ?></span>
-                                        <span class="mb-error-full"><?php echo esc_html( $entry['error_message'] ); ?></span>
-                                        <a href="#" class="mb-error-toggle"><?php esc_html_e( 'Show more', 'mighty-backup' ); ?></a>
-                                    <?php else : ?>
-                                        <?php echo esc_html( $entry['error_message'] ); ?>
+                                    $translated = Mighty_Backup_Error_Translator::translate( $entry['error_message'] );
+                                    $has_human  = $translated['human'] !== $translated['raw'];
+
+                                    if ( $has_human ) : ?>
+                                        <span class="mb-error-human"><?php echo esc_html( $translated['human'] ); ?></span>
+                                        <?php if ( $translated['suggestion'] ) : ?>
+                                            <span class="mb-error-suggestion"><?php echo esc_html( $translated['suggestion'] ); ?></span>
+                                        <?php endif; ?>
+                                        <span class="mb-error-raw"><code><?php echo esc_html( $translated['raw'] ); ?></code></span>
+                                        <a href="#" class="mb-error-toggle" data-mode="raw"><?php esc_html_e( 'Show raw error', 'mighty-backup' ); ?></a>
+                                    <?php else :
+                                        $word_count = str_word_count( $translated['raw'] );
+                                        if ( $word_count > 15 ) : ?>
+                                            <span class="mb-error-short"><?php echo esc_html( wp_trim_words( $translated['raw'], 15 ) ); ?></span>
+                                            <span class="mb-error-full"><?php echo esc_html( $translated['raw'] ); ?></span>
+                                            <a href="#" class="mb-error-toggle"><?php esc_html_e( 'Show more', 'mighty-backup' ); ?></a>
+                                        <?php else : ?>
+                                            <?php echo esc_html( $translated['raw'] ); ?>
+                                        <?php endif; ?>
                                     <?php endif; ?>
                                 <?php else : ?>
                                     &mdash;
@@ -512,8 +634,35 @@ $recent    = $logger->get_recent( 20 );
                     <?php endforeach; ?>
                 </tbody>
             </table>
+
+            <?php
+            if ( $history_result['total_pages'] > 1 ) :
+                $page_links = paginate_links( [
+                    'base'      => add_query_arg( 'bm_paged', '%#%' ),
+                    'format'    => '',
+                    'current'   => $history_result['paged'],
+                    'total'     => $history_result['total_pages'],
+                    'prev_text' => __( '&laquo; Prev', 'mighty-backup' ),
+                    'next_text' => __( 'Next &raquo;', 'mighty-backup' ),
+                    'add_args'  => false,
+                ] );
+                if ( $page_links ) :
+                    ?>
+                    <div class="mb-history-pagination tablenav">
+                        <div class="tablenav-pages"><?php echo $page_links; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped — paginate_links() returns safe markup ?></div>
+                    </div>
+                    <?php
+                endif;
+            endif;
+            ?>
         <?php else : ?>
-            <p class="description"><?php esc_html_e( 'No backups yet — run your first backup above.', 'mighty-backup' ); ?></p>
+            <p class="description">
+                <?php if ( $history_has_filters ) : ?>
+                    <?php esc_html_e( 'No backups match the current filters.', 'mighty-backup' ); ?>
+                <?php else : ?>
+                    <?php esc_html_e( 'No backups yet — run your first backup above.', 'mighty-backup' ); ?>
+                <?php endif; ?>
+            </p>
         <?php endif; ?>
     </div><!-- /backup -->
 
@@ -545,7 +694,10 @@ $recent    = $logger->get_recent( 20 );
         <table class="form-table">
             <?php if ( $has_key ) : ?>
             <tr>
-                <th scope="row"><?php esc_html_e( 'Bootstrap Key', 'mighty-backup' ); ?></th>
+                <th scope="row">
+                    <?php esc_html_e( 'Bootstrap Key', 'mighty-backup' ); ?>
+                    <?php mighty_backup_help_icon( __( 'Base64-encoded "site_url:api_key" combo. The Codespace bootstrap pipeline decodes it to discover this site\'s REST endpoint and authenticate against /codespace-config — so a single secret carries everything the Codespace needs to fetch DO Spaces credentials.', 'mighty-backup' ) ); ?>
+                </th>
                 <td>
                     <div class="mb-bootstrap-key-wrap">
                         <input type="text" id="mb-bootstrap-key" class="large-text code mb-bootstrap-key-input"

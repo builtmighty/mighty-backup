@@ -432,6 +432,7 @@ class Mighty_Backup_Manager {
         $this->save_state( $state );
 
         Mighty_Backup_Log_Stream::add( 'Backup complete!' );
+        Mighty_Backup_Log_Stream::clear_progress();
         Mighty_Backup_Log_Stream::flush();
 
         do_action( 'mighty_backup_completed', $state );
@@ -539,16 +540,18 @@ class Mighty_Backup_Manager {
      * Get the current status for the admin UI.
      */
     public function get_status( int $log_since = 0 ): array {
-        $state    = $this->get_state();
-        $log_data = Mighty_Backup_Log_Stream::get( $log_since );
+        $state         = $this->get_state();
+        $log_data      = Mighty_Backup_Log_Stream::get( $log_since );
+        $live_progress = Mighty_Backup_Log_Stream::get_progress();
 
         if ( ! $state ) {
             return [
-                'active'      => false,
-                'status'      => 'idle',
-                'message'     => 'No backup in progress.',
-                'log_entries' => $log_data['entries'],
-                'log_index'   => $log_data['index'],
+                'active'        => false,
+                'status'        => 'idle',
+                'message'       => 'No backup in progress.',
+                'log_entries'   => $log_data['entries'],
+                'log_index'     => $log_data['index'],
+                'live_progress' => null,
             ];
         }
 
@@ -575,6 +578,11 @@ class Mighty_Backup_Manager {
             $progress = round( ( $current / $total ) * 100 );
         }
 
+        $error_translated = null;
+        if ( ! empty( $state['error'] ) && class_exists( 'Mighty_Backup_Error_Translator' ) ) {
+            $error_translated = Mighty_Backup_Error_Translator::translate( $state['error'] );
+        }
+
         return [
             'active'       => in_array( $state['status'], [ 'pending', 'running' ], true ),
             'status'       => $state['status'],
@@ -587,6 +595,7 @@ class Mighty_Backup_Manager {
             'total_steps'  => $total,
             'progress'     => $progress,
             'error'        => $state['error'],
+            'error_translated' => $error_translated,
             'db_file_size'    => $state['db_file_size'],
             'files_file_size' => $state['files_file_size'],
             'started_at'   => $state['started_at'],
@@ -597,8 +606,9 @@ class Mighty_Backup_Manager {
                 'failed'    => 'Backup failed.',
                 default     => '',
             },
-            'log_entries'  => $log_data['entries'],
-            'log_index'    => $log_data['index'],
+            'log_entries'   => $log_data['entries'],
+            'log_index'     => $log_data['index'],
+            'live_progress' => $live_progress,
         ];
     }
 

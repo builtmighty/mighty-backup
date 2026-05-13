@@ -13,9 +13,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Mighty_Backup_Log_Stream {
 
-	private const OPTION_KEY    = 'bm_backup_live_log';
-	private const MAX_ENTRIES   = 200;
-	private const FLUSH_EVERY   = 10;
+	private const OPTION_KEY      = 'bm_backup_live_log';
+	private const PROGRESS_KEY    = 'bm_backup_live_progress';
+	private const MAX_ENTRIES     = 200;
+	private const FLUSH_EVERY     = 10;
 
 	/** @var array In-memory buffer of entries not yet persisted. */
 	private static array $buffer = [];
@@ -26,6 +27,7 @@ class Mighty_Backup_Log_Stream {
 	public static function start(): void {
 		self::$buffer = [];
 		delete_site_option( self::OPTION_KEY );
+		delete_site_option( self::PROGRESS_KEY );
 	}
 
 	/**
@@ -86,5 +88,42 @@ class Mighty_Backup_Log_Stream {
 	public static function clear(): void {
 		self::$buffer = [];
 		delete_site_option( self::OPTION_KEY );
+		delete_site_option( self::PROGRESS_KEY );
+	}
+
+	/**
+	 * Set the current step's live progress indicator.
+	 *
+	 * Stored in its own site option so the admin JS can render it as a single
+	 * replaceable line — not appended to the scrolling log. ETA is in seconds;
+	 * pass null when not yet computable (e.g. before the first part finishes).
+	 */
+	public static function set_progress( string $message, int $current, int $total, ?int $eta_seconds = null ): void {
+		update_site_option( self::PROGRESS_KEY, [
+			'message' => $message,
+			'current' => $current,
+			'total'   => $total,
+			'percent' => $total > 0 ? (int) round( ( $current / $total ) * 100 ) : 0,
+			'eta'     => $eta_seconds,
+			'time'    => gmdate( 'H:i:s' ),
+		] );
+	}
+
+	/**
+	 * Read the current progress payload, or null when none is set.
+	 *
+	 * @return array{message:string,current:int,total:int,percent:int,eta:?int,time:string}|null
+	 */
+	public static function get_progress(): ?array {
+		$p = get_site_option( self::PROGRESS_KEY );
+		return is_array( $p ) ? $p : null;
+	}
+
+	/**
+	 * Clear any current progress indicator. Call at step boundaries so a
+	 * completed step's progress doesn't linger into the next one.
+	 */
+	public static function clear_progress(): void {
+		delete_site_option( self::PROGRESS_KEY );
 	}
 }

@@ -62,6 +62,8 @@ class Mighty_Backup_Settings {
         add_action( 'wp_ajax_mighty_backup_cancel', [ $this, 'ajax_cancel' ] );
         add_action( 'wp_ajax_mighty_backup_generate_api_key', [ $this, 'ajax_generate_api_key' ] );
         add_action( 'wp_ajax_mighty_backup_download', [ $this, 'ajax_download' ] );
+        add_action( 'wp_ajax_mighty_backup_bulk_delete', [ $this, 'ajax_bulk_delete' ] );
+        add_action( 'wp_ajax_mighty_backup_dismiss_onboarding', [ $this, 'ajax_dismiss_onboarding' ] );
         add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
 
         if ( is_multisite() ) {
@@ -121,9 +123,10 @@ class Mighty_Backup_Settings {
             true
         );
         wp_localize_script( 'mighty-backup-admin', 'mightyBackup', [
-            'ajaxUrl' => admin_url( 'admin-ajax.php' ),
-            'nonce'   => wp_create_nonce( 'mighty_backup_nonce' ),
-            'restUrl' => esc_url_raw( rest_url() ),
+            'ajaxUrl'         => admin_url( 'admin-ajax.php' ),
+            'nonce'           => wp_create_nonce( 'mighty_backup_nonce' ),
+            'bulkDeleteNonce' => wp_create_nonce( 'mighty_backup_bulk_delete' ),
+            'restUrl'         => esc_url_raw( rest_url() ),
         ] );
     }
 
@@ -538,6 +541,82 @@ class Mighty_Backup_Settings {
     }
 
     /**
+     * Compute the state of each onboarding step.
+     *
+     * Each entry: [ key, label, target_tab, done (bool) ].
+     */
+    public function get_onboarding_steps(): array {
+        $has_storage     = $this->is_configured();
+        $has_api_key     = ! empty( Mighty_Backup_Api_Endpoint::get_key() );
+        $last_push       = get_site_option( Mighty_Devcontainer_Manager::LAST_PUSH_OPTION );
+        $has_pushed      = is_array( $last_push ) && ! empty( $last_push['timestamp'] );
+        $logger          = new Mighty_Backup_Logger();
+        $has_run_backup  = (bool) $logger->get_last_completed();
+
+        return [
+            [
+                'key'    => 'storage',
+                'label'  => __( 'Storage credentials', 'mighty-backup' ),
+                'tab'    => 'storage',
+                'done'   => $has_storage,
+                'hint'   => __( 'Add your DigitalOcean Spaces access key, secret, endpoint, and bucket, then click Test Connection.', 'mighty-backup' ),
+            ],
+            [
+                'key'    => 'schedule',
+                'label'  => __( 'Schedule', 'mighty-backup' ),
+                'tab'    => 'schedule',
+                // Schedule has sane defaults, so we mark it complete once storage is set
+                // — the wizard's job here is to direct attention to the tab, not gate setup.
+                'done'   => $has_storage,
+                'hint'   => __( 'Pick a frequency and time. Retention defaults to 7 backups — adjust if you want a longer tail.', 'mighty-backup' ),
+            ],
+            [
+                'key'    => 'api_key',
+                'label'  => __( 'Bootstrap key', 'mighty-backup' ),
+                'tab'    => 'codespace',
+                'done'   => $has_api_key,
+                'hint'   => __( 'Generate the Codespace bootstrap key — one secret carries this site\'s URL + API key.', 'mighty-backup' ),
+            ],
+            [
+                'key'    => 'github_push',
+                'label'  => __( 'Push to GitHub', 'mighty-backup' ),
+                'tab'    => 'devcontainer',
+                'done'   => $has_pushed,
+                'hint'   => __( 'Add your GitHub PAT on the Devcontainer tab, then push BM_BOOTSTRAP_KEY to the repo as a Codespaces secret.', 'mighty-backup' ),
+            ],
+            [
+                'key'    => 'first_backup',
+                'label'  => __( 'First backup', 'mighty-backup' ),
+                'tab'    => 'backup',
+                'done'   => $has_run_backup,
+                'hint'   => __( 'Run a manual backup to confirm the full pipeline works end-to-end.', 'mighty-backup' ),
+            ],
+        ];
+    }
+
+    /**
+     * Whether the onboarding wizard should render for the current user.
+     *
+     * Hidden when (a) the user dismissed it, (b) the plugin is fully configured
+     * with at least one successful backup, or (c) we just have nothing to show.
+     */
+    public function needs_onboarding(): bool {
+        $user_id = get_current_user_id();
+        if ( $user_id && get_user_meta( $user_id, 'bm_onboarding_dismissed', true ) ) {
+            return false;
+        }
+        $steps    = $this->get_onboarding_steps();
+        $all_done = true;
+        foreach ( $steps as $step ) {
+            if ( empty( $step['done'] ) ) {
+                $all_done = false;
+                break;
+            }
+        }
+        return ! $all_done;
+    }
+
+    /**
      * AJAX: Test DO Spaces connection.
      */
     public function ajax_test_connection(): void {
@@ -566,7 +645,7 @@ class Mighty_Backup_Settings {
             $result = $client->test_connection();
             wp_send_json_success( $result );
         } catch ( \Exception $e ) {
-            wp_send_json_error( $e->getMessage() );
+            Mighty_Backup_Error_Translator::send_ajax_error( $e );
         }
     }
 
@@ -605,7 +684,7 @@ class Mighty_Backup_Settings {
                 'message' => 'Backup scheduled. It will begin processing in the background.',
             ] );
         } catch ( \Exception $e ) {
-            wp_send_json_error( $e->getMessage() );
+            Mighty_Backup_Error_Translator::send_ajax_error( $e );
         }
     }
 
@@ -735,8 +814,99 @@ class Mighty_Backup_Settings {
             $url    = $client->get_presigned_url( $key );
             wp_send_json_success( [ 'url' => $url ] );
         } catch ( \Exception $e ) {
-            wp_send_json_error( 'Failed to generate download URL: ' . $e->getMessage() );
+            Mighty_Backup_Error_Translator::send_ajax_error( 'Failed to generate download URL: ' . $e->getMessage() );
         }
+    }
+
+    /**
+     * AJAX: Dismiss the onboarding wizard for the current user.
+     */
+    public function ajax_dismiss_onboarding(): void {
+        check_ajax_referer( 'mighty_backup_nonce', 'nonce' );
+
+        if ( ! current_user_can( is_multisite() ? 'manage_network_options' : 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        if ( ! $this->is_authorized_user() ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        $user_id = get_current_user_id();
+        if ( $user_id ) {
+            update_user_meta( $user_id, 'bm_onboarding_dismissed', 1 );
+        }
+
+        wp_send_json_success();
+    }
+
+    /**
+     * AJAX: Bulk-delete backup history rows and their Spaces objects.
+     *
+     * Expects POST { log_ids: int[] }. Caps the per-request batch at 50;
+     * the JS chunks larger selections. Running rows are filtered server-side
+     * so a caller can't drop a backup that's still in progress.
+     */
+    public function ajax_bulk_delete(): void {
+        check_ajax_referer( 'mighty_backup_bulk_delete', 'nonce' );
+
+        if ( ! current_user_can( is_multisite() ? 'manage_network_options' : 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        if ( ! $this->is_authorized_user() ) {
+            wp_send_json_error( 'Unauthorized' );
+        }
+
+        $raw_ids = isset( $_POST['log_ids'] ) ? (array) wp_unslash( $_POST['log_ids'] ) : [];
+        $log_ids = array_slice(
+            array_values( array_unique( array_filter( array_map( 'intval', $raw_ids ) ) ) ),
+            0,
+            50
+        );
+
+        if ( ! $log_ids ) {
+            wp_send_json_error( 'No backups selected.' );
+        }
+
+        $logger  = new Mighty_Backup_Logger();
+        $entries = $logger->get_by_ids( $log_ids );
+
+        if ( ! $entries ) {
+            wp_send_json_error( 'No deletable backups found in selection (running backups cannot be deleted).' );
+        }
+
+        // Collect Spaces keys to remove.
+        $remote_keys = [];
+        foreach ( $entries as $entry ) {
+            if ( ! empty( $entry['db_remote_key'] ) ) {
+                $remote_keys[] = $entry['db_remote_key'];
+            }
+            if ( ! empty( $entry['files_remote_key'] ) ) {
+                $remote_keys[] = $entry['files_remote_key'];
+            }
+        }
+
+        $remote_errors = [];
+        if ( $remote_keys && mighty_backup_has_sdk() && $this->is_configured() ) {
+            try {
+                $client = new Mighty_Backup_Spaces_Client( $this );
+                $client->delete_objects( $remote_keys );
+            } catch ( \Throwable $e ) {
+                // Capture the error but still delete the log rows — the user
+                // explicitly asked to clear these from history.
+                $remote_errors[] = $e->getMessage();
+            }
+        }
+
+        $deleted = $logger->delete_by_ids( array_keys( $entries ) );
+
+        wp_send_json_success( [
+            'deleted_rows'    => $deleted,
+            'deleted_objects' => count( $remote_keys ),
+            'remote_errors'   => $remote_errors,
+            'skipped_running' => count( $log_ids ) - count( $entries ),
+        ] );
     }
 
     /**

@@ -78,14 +78,48 @@ class Mighty_Backup_Spaces_Client {
 
         Mighty_Backup_Log_Stream::add( 'Starting multipart upload: ' . $remote_key );
 
+        // Total part count is filesize / part_size, rounded up. Used for the
+        // live progress indicator + ETA.
+        $file_size   = @filesize( $local_path );
+        $total_parts = $file_size > 0 ? max( 1, (int) ceil( $file_size / $part_size ) ) : 0;
+
+        // Counter is shared with the before_upload closure so progress survives
+        // multipart retries (we re-create the uploader with the prior state).
+        $completed_parts = 0;
+        $upload_started  = microtime( true );
+
+        $progress_callback = function () use ( &$completed_parts, $total_parts, $upload_started, $remote_key ) {
+            gc_collect_cycles();
+
+            if ( $total_parts <= 0 ) {
+                return;
+            }
+
+            // before_upload fires BEFORE each part. So when it fires the Nth
+            // time, parts 1..(N-1) are done and we're starting part N.
+            $current = $completed_parts + 1;
+            $elapsed = microtime( true ) - $upload_started;
+            $eta     = null;
+            if ( $completed_parts > 0 ) {
+                $per_part = $elapsed / $completed_parts;
+                $eta      = (int) round( $per_part * ( $total_parts - $completed_parts ) );
+            }
+
+            Mighty_Backup_Log_Stream::set_progress(
+                sprintf( 'Uploading %s: part %d of %d', basename( $remote_key ), $current, $total_parts ),
+                $current,
+                $total_parts,
+                $eta
+            );
+            ++$completed_parts;
+        };
+
         $uploader = new MultipartUploader( $this->client, $local_path, [
             'bucket'        => $this->bucket,
             'key'           => $full_key,
             'part_size'     => $part_size,
             'concurrency'   => $concurrency,
-            'before_upload' => function () {
-                gc_collect_cycles();
-            },
+            'before_upload' => $progress_callback,
         ] );
 
         $attempt = 0;
@@ -93,22 +127,27 @@ class Mighty_Backup_Spaces_Client {
             $attempt++;
             try {
                 $uploader->upload();
+                Mighty_Backup_Log_Stream::clear_progress();
                 Mighty_Backup_Log_Stream::add( 'Upload complete: ' . $remote_key );
                 return $full_key;
             } catch ( MultipartUploadException $e ) {
                 if ( $attempt >= $max_retries ) {
+                    Mighty_Backup_Log_Stream::clear_progress();
                     throw new \Exception(
                         sprintf( 'Upload failed after %d attempts: %s', $max_retries, $e->getMessage() )
                     );
                 }
                 Mighty_Backup_Log_Stream::add( 'Upload attempt ' . $attempt . ' failed, retrying...' );
-                // Resume from where we left off.
+                // Resume from where we left off — preserve progress callback
+                // so the part counter keeps ticking on retry.
                 $uploader = new MultipartUploader( $this->client, $local_path, [
-                    'state' => $e->getState(),
+                    'state'         => $e->getState(),
+                    'before_upload' => $progress_callback,
                 ] );
             }
         } while ( $attempt < $max_retries );
 
+        Mighty_Backup_Log_Stream::clear_progress();
         return $full_key;
     }
 

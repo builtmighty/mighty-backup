@@ -159,7 +159,7 @@ class Mighty_Devcontainer_Manager {
 			$result = $this->check_version();
 			wp_send_json_success( $result );
 		} catch ( \Exception $e ) {
-			wp_send_json_error( $e->getMessage() );
+			Mighty_Backup_Error_Translator::send_ajax_error( $e );
 		}
 	}
 
@@ -181,7 +181,7 @@ class Mighty_Devcontainer_Manager {
 			$result = $this->install_or_update();
 			wp_send_json_success( $result );
 		} catch ( \Exception $e ) {
-			wp_send_json_error( $e->getMessage() );
+			Mighty_Backup_Error_Translator::send_ajax_error( $e );
 		}
 	}
 
@@ -204,7 +204,7 @@ class Mighty_Devcontainer_Manager {
 			$result = $this->push_bootstrap_secret();
 			wp_send_json_success( $result );
 		} catch ( \Exception $e ) {
-			wp_send_json_error( $e->getMessage() );
+			Mighty_Backup_Error_Translator::send_ajax_error( $e );
 		}
 	}
 

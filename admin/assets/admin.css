@@ -1,3 +1,175 @@
+/*
+ * Color tokens — tuned per WordPress admin color scheme so the plugin's UI
+ * blends in. The body's admin-color-* class is set by WordPress; we override
+ * tokens for the darker schemes WP ships with.
+ *
+ * Two surfaces are kept dark on PURPOSE in all schemes: the live log box
+ * (terminal feel) and the help tooltip popover (consistent contrast).
+ */
+.mb-backup-wrap {
+    --mb-surface: #fff;
+    --mb-surface-muted: #f5f5f5;
+    --mb-border: #ddd;
+    --mb-border-strong: #aaa;
+    --mb-text: #1d2327;
+    --mb-text-muted: #555;
+    --mb-text-faint: #888;
+    --mb-link: #2271b1;
+    --mb-link-hover: #135e96;
+    --mb-success-bg: #d4edda;
+    --mb-success-fg: #155724;
+    --mb-error-bg: #f8d7da;
+    --mb-error-fg: #721c24;
+    --mb-running-bg: #fff3cd;
+    --mb-running-fg: #856404;
+    --mb-step-bg: #e0e0e0;
+    --mb-step-fg: #666;
+    --mb-modal-overlay: rgba(0, 0, 0, 0.5);
+}
+
+body.admin-color-modern .mb-backup-wrap,
+body.admin-color-coffee .mb-backup-wrap,
+body.admin-color-midnight .mb-backup-wrap,
+body.admin-color-ectoplasm .mb-backup-wrap {
+    --mb-surface: #2c3338;
+    --mb-surface-muted: #1d2327;
+    --mb-border: #4a4f54;
+    --mb-border-strong: #777;
+    --mb-text: #f0f0f1;
+    --mb-text-muted: #c3c4c7;
+    --mb-text-faint: #a7aaad;
+    --mb-link: #72aee6;
+    --mb-link-hover: #b9dafa;
+    --mb-step-bg: #3a3f44;
+    --mb-step-fg: #c3c4c7;
+    --mb-success-bg: #1d3a2a;
+    --mb-success-fg: #6ad48d;
+    --mb-error-bg: #3a1d22;
+    --mb-error-fg: #f0848c;
+    --mb-running-bg: #3a341d;
+    --mb-running-fg: #f0d878;
+}
+
+/* Onboarding wizard */
+.mb-onboarding {
+    background: var(--mb-surface);
+    border: 1px solid var(--mb-border);
+    border-left: 4px solid var(--mb-link);
+    border-radius: 4px;
+    padding: 14px 18px;
+    margin: 12px 0 20px;
+}
+
+.mb-onboarding-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.mb-onboarding-title {
+    margin: 0 !important;
+    font-size: 14px;
+    color: var(--mb-text);
+}
+
+.mb-onboarding-progress {
+    color: var(--mb-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.mb-onboarding-dismiss {
+    margin-left: auto;
+    background: none;
+    border: 0;
+    color: var(--mb-text-muted);
+    font-size: 12px;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+}
+
+.mb-onboarding-dismiss:hover {
+    color: var(--mb-text);
+}
+
+.mb-onboarding-steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+}
+
+.mb-onboarding-step-link {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--mb-border);
+    border-radius: 4px;
+    background: var(--mb-surface-muted);
+    text-decoration: none;
+    color: var(--mb-text);
+    transition: border-color 0.15s, background 0.15s;
+    height: 100%;
+}
+
+.mb-onboarding-step-link:hover,
+.mb-onboarding-step-link:focus {
+    border-color: var(--mb-link);
+    color: var(--mb-text);
+    outline: none;
+}
+
+.mb-onboarding-step-marker {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--mb-step-bg);
+    color: var(--mb-step-fg);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.mb-onboarding-step-done .mb-onboarding-step-marker {
+    background: var(--mb-success-bg);
+    color: var(--mb-success-fg);
+}
+
+.mb-onboarding-check {
+    font-size: 13px;
+}
+
+.mb-onboarding-step-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.mb-onboarding-step-label {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.mb-onboarding-step-done .mb-onboarding-step-label {
+    text-decoration: line-through;
+    color: var(--mb-text-muted);
+}
+
+.mb-onboarding-step-hint {
+    font-size: 11px;
+    color: var(--mb-text-muted);
+    line-height: 1.4;
+}
+
 /* Tab panels */
 .mb-tab-panel {
     display: none;
@@ -48,28 +220,28 @@
 }
 
 .mb-status-completed {
-    background: #d4edda;
-    color: #155724;
+    background: var(--mb-success-bg);
+    color: var(--mb-success-fg);
 }
 
 .mb-status-running {
-    background: #fff3cd;
-    color: #856404;
+    background: var(--mb-running-bg);
+    color: var(--mb-running-fg);
 }
 
 .mb-status-failed {
-    background: #f8d7da;
-    color: #721c24;
+    background: var(--mb-error-bg);
+    color: var(--mb-error-fg);
 }
 
 .mb-status-cancelled {
-    background: #e2e3e5;
-    color: #383d41;
+    background: var(--mb-step-bg);
+    color: var(--mb-step-fg);
 }
 
 /* Error cell — expandable */
 .mb-error-cell {
-    max-width: 300px;
+    max-width: 360px;
     word-wrap: break-word;
 }
 
@@ -86,11 +258,77 @@
 }
 
 .mb-error-toggle {
-    color: #0073aa;
+    color: var(--mb-link);
     cursor: pointer;
     font-size: 12px;
     margin-left: 4px;
     text-decoration: underline;
+}
+
+/* Translated error rendering — used in backup history and result banners */
+.mb-error-human {
+    display: block;
+    font-weight: 600;
+}
+
+.mb-error-suggestion {
+    display: block;
+    color: var(--mb-text-muted);
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+.mb-error-raw {
+    display: none;
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: var(--mb-surface-muted);
+    border-left: 3px solid var(--mb-border);
+    font-size: 11px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    color: var(--mb-text-muted);
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+.mb-error-cell.expanded .mb-error-raw {
+    display: block;
+}
+
+/* Result-banner translated error (used by renderResult() in admin.js) */
+.mb-result-human {
+    display: inline;
+    font-weight: 600;
+}
+
+.mb-result-suggestion {
+    display: block;
+    margin-top: 4px;
+    font-weight: 400;
+    color: var(--mb-text-muted);
+    font-size: 13px;
+}
+
+.mb-result-raw-toggle {
+    display: inline-block;
+    margin-left: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--mb-link);
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.mb-result-raw {
+    display: block;
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: var(--mb-surface-muted);
+    border-left: 3px solid var(--mb-border);
+    font-size: 11px;
+    color: var(--mb-text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* Running button */
@@ -111,19 +349,19 @@
     font-size: 12px;
     padding: 2px 10px;
     border-radius: 3px;
-    background: #e0e0e0;
-    color: #666;
+    background: var(--mb-step-bg);
+    color: var(--mb-step-fg);
     white-space: nowrap;
 }
 
 .mb-step-active {
-    background: #0073aa;
+    background: var(--mb-link);
     color: #fff;
 }
 
 .mb-step-done {
-    background: #d4edda;
-    color: #155724;
+    background: var(--mb-success-bg);
+    color: var(--mb-success-fg);
 }
 
 /* Progress bar */
@@ -134,7 +372,7 @@
 }
 
 .mb-progress-bar-wrap {
-    background: #e0e0e0;
+    background: var(--mb-step-bg);
     border-radius: 4px;
     height: 20px;
     overflow: hidden;
@@ -142,7 +380,7 @@
 }
 
 .mb-progress-bar {
-    background: #0073aa;
+    background: var(--mb-link);
     height: 100%;
     width: 0;
     border-radius: 4px;
@@ -151,8 +389,15 @@
 
 .mb-progress-text {
     font-size: 13px;
-    color: #555;
+    color: var(--mb-text-muted);
     font-style: italic;
+}
+
+.mb-live-progress {
+    margin-top: 4px;
+    font-size: 12px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    color: var(--mb-text-muted);
 }
 
 /* Live Log Box */
@@ -171,13 +416,13 @@
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
-    color: #888;
+    color: var(--mb-text-faint);
     letter-spacing: 0.5px;
 }
 
 .mb-log-toggle {
     font-size: 12px;
-    color: #0073aa;
+    color: var(--mb-link);
     cursor: pointer;
     background: none;
     border: none;
@@ -222,20 +467,77 @@
     }
 }
 
+/* Help icon + tooltip */
+.mb-help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin-left: 6px;
+    border: 1px solid var(--mb-border-strong);
+    border-radius: 50%;
+    background: var(--mb-surface-muted);
+    color: var(--mb-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    vertical-align: middle;
+}
+
+.mb-help-icon:hover,
+.mb-help-icon:focus,
+.mb-help-icon[aria-expanded="true"] {
+    background: var(--mb-link);
+    border-color: var(--mb-link);
+    color: #fff;
+    outline: none;
+}
+
+.mb-help-tooltip {
+    position: absolute;
+    z-index: 100001;
+    max-width: 320px;
+    background: #1e1e1e;
+    color: #f5f5f5;
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    pointer-events: auto;
+}
+
+.mb-help-tooltip-body {
+    font-weight: 400;
+}
+
+.mb-help-tooltip-arrow {
+    position: absolute;
+    top: -6px;
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-bottom: 6px solid #1e1e1e;
+}
+
 /* Show/hide password toggle */
 .mb-toggle-password {
     margin-left: 4px;
     text-decoration: underline;
     cursor: pointer;
     font-size: 13px;
-    color: #0073aa;
+    color: var(--mb-link);
     background: none;
     border: none;
     padding: 0;
 }
 
 .mb-toggle-password:hover {
-    color: #005177;
+    color: var(--mb-link-hover);
 }
 
 /* Inline validation */
@@ -258,12 +560,13 @@
 }
 
 .mb-modal-content {
-    background: #fff;
+    background: var(--mb-surface);
+    color: var(--mb-text);
     padding: 24px;
     border-radius: 6px;
     max-width: 440px;
     width: 90%;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
 }
 
 .mb-modal-content p {
@@ -289,6 +592,94 @@
     display: none;
 }
 
+/* Backup history filters + paginator */
+.mb-history-filters {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0 8px;
+    font-size: 13px;
+}
+
+.mb-history-filters select {
+    max-width: 160px;
+}
+
+.mb-history-date-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--mb-text-muted);
+}
+
+.mb-history-date-label input[type="date"] {
+    padding: 2px 4px;
+}
+
+.mb-history-clear {
+    color: var(--mb-text-muted);
+    text-decoration: none;
+    font-size: 12px;
+}
+
+.mb-history-clear:hover {
+    text-decoration: underline;
+}
+
+.mb-history-count {
+    margin-left: auto;
+    color: var(--mb-text-muted);
+    font-size: 12px;
+    font-style: italic;
+}
+
+.mb-history-pagination {
+    margin-top: 10px;
+    padding: 6px 0;
+    text-align: right;
+}
+
+.mb-history-pagination .page-numbers {
+    display: inline-block;
+    padding: 3px 8px;
+    margin-left: 2px;
+    border: 1px solid var(--mb-border);
+    border-radius: 3px;
+    color: var(--mb-link);
+    text-decoration: none;
+    font-size: 12px;
+}
+
+.mb-history-pagination .page-numbers.current {
+    background: var(--mb-link);
+    border-color: var(--mb-link);
+    color: #fff;
+}
+
+.mb-history-pagination .page-numbers.dots {
+    border: 0;
+    color: var(--mb-text-faint);
+}
+
+.mb-history-bulk {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+}
+
+.mb-history-check.check-column {
+    width: 2.2em;
+    text-align: center;
+    padding-left: 4px;
+    padding-right: 4px;
+}
+
+.mb-history-check input[type="checkbox"] {
+    margin: 0;
+}
+
 /* Bootstrap key section */
 .mb-bootstrap-key-wrap {
     display: flex;
@@ -309,7 +700,7 @@
 }
 
 .mb-key-warning {
-    color: #856404;
+    color: var(--mb-running-fg);
 }
 
 /* Responsive */
