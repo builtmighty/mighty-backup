@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.12.0
+Stable tag: 2.13.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,16 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.13.0 =
+* Added mid-table resumable PHP database export — `export_table_data_pk()` now time-checks between SQL batches and persists `{current_table, current_table_pk, current_table_last_pk}` in `db_export` state so a single large table can be sliced across multiple Action Scheduler chunks; survives any reasonable `max_execution_time` cap (the load-bearing fix for 9 GB single-table sites on hosts like Kinsta)
+* Added range-chunked mysqldump path — tables exceeding `db_large_table_threshold_mb` (default 1 GB) are dumped as a sequence of `mysqldump --where='pk > A AND pk <= B'` invocations sized adaptively from the previous range's wall-time; small tables continue to flow through a single mysqldump invocation, and streamlined mode automatically falls back to the chunked PHP path so order/log filtering still applies
+* Added pre-flight per-table size snapshot — one `information_schema` query at the start of a chunked export populates the live log with `Table wp_postmeta: 9.0 GB` per table-start, making "stuck on big table" obvious in the UI
+* Added Advanced settings disclosure in the Schedule tab — `Chunk Seconds` (10–300, default 30) and `Large-Table Threshold` (128–10240 MB, default 1024) exposed via the existing form; the long-standing `mighty_backup_db_chunk_seconds` filter still wins over the option for `wp-config.php` overrides
+* Added error-translator remediation hints for `Maximum execution time of N seconds exceeded` and "table has no primary key" — both deep-link into Settings → Schedule with concrete next steps (raise Chunk Seconds, mark structure-only, or add a PK)
+* Fixed `get_large_tables()` skipping structure-only tables — a 9 GB log table marked structure-only would previously have been range-dumped, producing duplicate `CREATE TABLE` statements and exporting the data the user explicitly suppressed
+* Fixed CLI `coerce_value` honoring the new `max` field in `KEY_META` — `wp mighty-backup settings set db_chunk_seconds 9999` is now rejected with a clear out-of-range message, matching the web UI clamp
+* Fixed `finalize_mysqldump_chunked()` no longer appending the PHP-path postamble (`SET FOREIGN_KEY_CHECKS=1; COMMIT;`) when the placeholder-sanitization filter is disabled — mysqldump's own state-restore block stays authoritative
 
 = 2.12.0 =
 * Added onboarding wizard (`admin/views/onboarding-wizard.php`) — five-step chip flow covering Storage Credentials, GitHub Integration, Backup Schedule, Codespace Settings, and Notifications, so new installs see a guided setup instead of an empty settings page
