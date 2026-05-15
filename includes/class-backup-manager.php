@@ -167,9 +167,15 @@ class Mighty_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'export_db' );
 
-        $settings    = new Mighty_Backup_Settings();
-        $streamlined = (bool) $settings->get( 'streamlined_mode', false );
-        $exporter    = new Mighty_Backup_Database_Exporter( $streamlined );
+        $settings              = new Mighty_Backup_Settings();
+        $streamlined           = (bool) $settings->get( 'streamlined_mode', false );
+        $excluded_tables       = (array) $settings->get( 'excluded_tables', [] );
+        $structure_only_tables = (array) $settings->get( 'structure_only_tables', [] );
+        $exporter              = new Mighty_Backup_Database_Exporter(
+            $streamlined,
+            $excluded_tables,
+            $structure_only_tables
+        );
 
         try {
             // First invocation: determine method and initialize.

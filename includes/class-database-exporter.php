@@ -19,6 +19,13 @@ class Mighty_Backup_Database_Exporter {
     private bool $streamlined;
 
     /**
+     * User-configured per-table overrides (assoc maps for O(1) lookup).
+     * Tables absent from both maps are exported normally.
+     */
+    private array $excluded_tables = [];
+    private array $structure_only_tables = [];
+
+    /**
      * Write function — 'gzwrite' for gzip handles, 'fwrite' for plain files.
      * Toggled by export_tables_chunk() / finalize_export() for the chunked path.
      */
@@ -32,9 +39,37 @@ class Mighty_Backup_Database_Exporter {
      */
     private int $placeholder_strips = 0;
 
-    public function __construct( bool $streamlined = false ) {
-        $this->batch_size   = (int) apply_filters( 'mighty_backup_db_batch_size', 1000 );
-        $this->streamlined  = $streamlined;
+    public function __construct(
+        bool $streamlined = false,
+        array $excluded_tables = [],
+        array $structure_only_tables = []
+    ) {
+        $this->batch_size            = (int) apply_filters( 'mighty_backup_db_batch_size', 1000 );
+        $this->streamlined           = $streamlined;
+        $this->excluded_tables       = array_fill_keys( array_values( $excluded_tables ), true );
+        $this->structure_only_tables = array_fill_keys( array_values( $structure_only_tables ), true );
+    }
+
+    /**
+     * Resolve a table's export mode based on user overrides.
+     *
+     * @return string 'skip', 'structure_only', or 'full'.
+     */
+    private function table_mode( string $table ): string {
+        if ( isset( $this->excluded_tables[ $table ] ) ) {
+            return 'skip';
+        }
+        if ( isset( $this->structure_only_tables[ $table ] ) ) {
+            return 'structure_only';
+        }
+        return 'full';
+    }
+
+    /**
+     * Whether any per-table override is configured.
+     */
+    private function has_table_overrides(): bool {
+        return ! empty( $this->excluded_tables ) || ! empty( $this->structure_only_tables );
     }
 
     /**
@@ -104,12 +139,21 @@ class Mighty_Backup_Database_Exporter {
     }
 
     /**
-     * Get the ordered list of all database tables.
+     * Get the ordered list of all database tables, minus any the user
+     * has set to skip. The chunked loop iterates this list, so skipped
+     * tables never appear in progress counts or per-table logs.
      *
      * @return string[] Table names.
      */
     public function get_table_list(): array {
-        return $this->get_tables();
+        $tables = $this->get_tables();
+        if ( empty( $this->excluded_tables ) ) {
+            return $tables;
+        }
+        return array_values( array_filter(
+            $tables,
+            fn( $t ) => ! isset( $this->excluded_tables[ $t ] )
+        ) );
     }
 
     /**
@@ -171,8 +215,23 @@ class Mighty_Backup_Database_Exporter {
 
             for ( $i = $start_index; $i < $total; $i++ ) {
                 $table = $tables[ $i ];
+                $mode  = $this->table_mode( $table );
 
-                if ( $streamlined_config ) {
+                if ( $mode === 'skip' ) {
+                    // Defensive — get_table_list() already filters these out,
+                    // but a caller may have passed a raw table list.
+                    if ( $chunk_seconds > 0 && ( time() - $started_at ) >= $chunk_seconds ) {
+                        fclose( $fh );
+                        $this->writer = 'gzwrite';
+                        $this->emit_placeholder_warning();
+                        return $i + 1;
+                    }
+                    continue;
+                }
+
+                if ( $mode === 'structure_only' ) {
+                    $this->export_table_structure_only( $fh, $table );
+                } elseif ( $streamlined_config ) {
                     $this->export_table_chunked_streamlined(
                         $fh, $table, $streamlined_config, $order_ids ?? [], $order_item_ids ?? []
                     );
@@ -359,7 +418,23 @@ class Mighty_Backup_Database_Exporter {
         $defaults   = $this->write_mysql_defaults();
         $bin        = $this->get_dump_binary();
         $sanitize   = (bool) apply_filters( 'mighty_backup_sanitize_placeholder_hashes', true );
-        $raw_path   = $sanitize ? $output_path . '.raw.sql' : null;
+
+        // Force the two-stage path when overrides are present so we can
+        // append CREATE TABLE statements for structure-only tables after
+        // mysqldump finishes.
+        $has_overrides = $this->has_table_overrides();
+        if ( $has_overrides ) {
+            $sanitize = true;
+        }
+        $raw_path = $sanitize ? $output_path . '.raw.sql' : null;
+
+        $ignore_flags = $this->build_ignore_flags(
+            array_merge(
+                array_keys( $this->excluded_tables ),
+                array_keys( $this->structure_only_tables )
+            )
+        );
+        $structure_only_list = array_keys( $this->structure_only_tables );
 
         try {
             if ( $sanitize ) {
@@ -367,9 +442,10 @@ class Mighty_Backup_Database_Exporter {
                 $command = sprintf(
                     '%s --defaults-extra-file=%s --single-transaction --quick --skip-lock-tables --set-charset '
                     . '--default-character-set=utf8mb4 --no-tablespaces '
-                    . '%s > %s 2>%s',
+                    . '%s %s > %s 2>%s',
                     escapeshellcmd( $bin ),
                     escapeshellarg( $defaults ),
+                    $ignore_flags,
                     escapeshellarg( DB_NAME ),
                     escapeshellarg( $raw_path ),
                     escapeshellarg( $err_path )
@@ -378,9 +454,10 @@ class Mighty_Backup_Database_Exporter {
                 $pipe = sprintf(
                     '%s --defaults-extra-file=%s --single-transaction --quick --skip-lock-tables --set-charset '
                     . '--default-character-set=utf8mb4 --no-tablespaces '
-                    . '%s 2>%s | gzip -%d > %s',
+                    . '%s %s 2>%s | gzip -%d > %s',
                     escapeshellcmd( $bin ),
                     escapeshellarg( $defaults ),
+                    $ignore_flags,
                     escapeshellarg( DB_NAME ),
                     escapeshellarg( $err_path ),
                     $gzip_level,
@@ -405,7 +482,7 @@ class Mighty_Backup_Database_Exporter {
             }
 
             if ( $sanitize ) {
-                $this->sanitize_and_gzip( $raw_path, $output_path, $gzip_level );
+                $this->sanitize_and_gzip( $raw_path, $output_path, $gzip_level, $structure_only_list );
                 @unlink( $raw_path );
             }
 
@@ -421,12 +498,30 @@ class Mighty_Backup_Database_Exporter {
     }
 
     /**
+     * Build a string of `--ignore-table=DB_NAME.<table>` flags for the dump command.
+     *
+     * @param string[] $tables Table names to ignore.
+     */
+    private function build_ignore_flags( array $tables ): string {
+        $flags = '';
+        foreach ( array_unique( $tables ) as $table ) {
+            $flags .= ' --ignore-table=' . escapeshellarg( DB_NAME . '.' . $table );
+        }
+        return $flags;
+    }
+
+    /**
      * Sanitize a raw SQL dump (stripping any wpdb placeholder-escape tokens)
      * while streaming it into a gzip output file. Used by the mysqldump
      * paths to repair `{HASH}` corruption in production data without
      * modifying production itself.
      */
-    private function sanitize_and_gzip( string $raw_path, string $output_path, int $gzip_level ): void {
+    private function sanitize_and_gzip(
+        string $raw_path,
+        string $output_path,
+        int $gzip_level,
+        array $structure_only_tables = []
+    ): void {
         $in = fopen( $raw_path, 'rb' );
         if ( ! $in ) {
             throw new \Exception( "Failed to read mysqldump output: {$raw_path}" );
@@ -448,6 +543,25 @@ class Mighty_Backup_Database_Exporter {
                     }
                 }
                 gzwrite( $gz, $line );
+            }
+
+            // Append CREATE TABLE statements for structure-only tables. These were
+            // excluded from mysqldump (via --ignore-table) so their schemas wouldn't
+            // otherwise appear in the dump.
+            if ( ! empty( $structure_only_tables ) ) {
+                // Temporarily route the writer to gzwrite for the helper.
+                $previous_writer = $this->writer;
+                $this->writer    = 'gzwrite';
+                try {
+                    gzwrite( $gz, "\n-- Structure-only tables (excluded from data dump per user setting)\n" );
+                    gzwrite( $gz, "SET FOREIGN_KEY_CHECKS = 0;\n\n" );
+                    foreach ( $structure_only_tables as $table ) {
+                        $this->export_table_structure_only( $gz, $table );
+                    }
+                    gzwrite( $gz, "\nSET FOREIGN_KEY_CHECKS = 1;\n" );
+                } finally {
+                    $this->writer = $previous_writer;
+                }
             }
         } finally {
             fclose( $in );
@@ -486,8 +600,16 @@ class Mighty_Backup_Database_Exporter {
             Mighty_Backup_Log_Stream::add( 'Using PHP fallback for database export (' . $table_count . ' tables)' );
 
             foreach ( $tables as $i => $table ) {
+                $mode = $this->table_mode( $table );
+                if ( $mode === 'skip' ) {
+                    continue;
+                }
                 Mighty_Backup_Log_Stream::add( 'Exporting table ' . ( $i + 1 ) . '/' . $table_count . ': ' . $table );
-                $this->export_table( $gz, $table );
+                if ( $mode === 'structure_only' ) {
+                    $this->export_table_structure_only( $gz, $table );
+                } else {
+                    $this->export_table( $gz, $table );
+                }
             }
 
             $this->write_postamble( $gz );
@@ -519,10 +641,25 @@ class Mighty_Backup_Database_Exporter {
         $special = $this->get_streamlined_special_tables();
         $gzip_level = $this->get_gzip_level();
 
+        // Apply user overrides on top of the streamlined config:
+        // - "skip"            → drop from any streamlined category; always ignored by mysqldump.
+        // - "structure_only"  → ignored by mysqldump and added to log_tables for the structure append.
+        foreach ( $this->excluded_tables as $excluded => $_ ) {
+            $special['log_tables']   = array_values( array_diff( $special['log_tables'], [ $excluded ] ) );
+            unset( $special['order_tables'][ $excluded ] );
+        }
+        foreach ( $this->structure_only_tables as $struct => $_ ) {
+            unset( $special['order_tables'][ $struct ] );
+            if ( ! in_array( $struct, $special['log_tables'], true ) ) {
+                $special['log_tables'][] = $struct;
+            }
+        }
+
         // Step 1: mysqldump everything except special tables to a temp SQL file.
         $ignore_tables = array_merge(
             $special['log_tables'],
-            array_keys( $special['order_tables'] )
+            array_keys( $special['order_tables'] ),
+            array_keys( $this->excluded_tables )
         );
 
         // If legacy mode, also exclude posts and postmeta from mysqldump.
@@ -532,10 +669,7 @@ class Mighty_Backup_Database_Exporter {
             $ignore_tables[] = $wpdb->postmeta;
         }
 
-        $ignore_flags = '';
-        foreach ( $ignore_tables as $table ) {
-            $ignore_flags .= ' --ignore-table=' . escapeshellarg( DB_NAME . '.' . $table );
-        }
+        $ignore_flags = $this->build_ignore_flags( $ignore_tables );
 
         $bin = $this->get_dump_binary();
         Mighty_Backup_Log_Stream::add( 'Using ' . $bin . ' (streamlined) for bulk tables' );
@@ -665,8 +799,15 @@ class Mighty_Backup_Database_Exporter {
             $order_item_ids = $this->get_order_item_ids( $order_ids );
 
             foreach ( $tables as $i => $table ) {
+                $mode = $this->table_mode( $table );
+                if ( $mode === 'skip' ) {
+                    continue;
+                }
                 Mighty_Backup_Log_Stream::add( 'Exporting table ' . ( $i + 1 ) . '/' . $table_count . ': ' . $table );
-                if ( in_array( $table, $log_tables, true ) ) {
+                if ( $mode === 'structure_only' ) {
+                    // User override wins over streamlined rules.
+                    $this->export_table_structure_only( $gz, $table );
+                } elseif ( in_array( $table, $log_tables, true ) ) {
                     // Structure only for log tables.
                     $this->export_table_structure_only( $gz, $table );
                 } elseif ( isset( $order_tables[ $table ] ) ) {
@@ -706,8 +847,11 @@ class Mighty_Backup_Database_Exporter {
         $this->write( $gz, "\n-- Streamlined export: filtered tables\n" );
         $this->write( $gz, "SET FOREIGN_KEY_CHECKS = 0;\n\n" );
 
-        // Log tables: structure only.
+        // Log tables (and any user "structure_only" entries merged in): structure only.
         foreach ( $special['log_tables'] as $table ) {
+            if ( isset( $this->excluded_tables[ $table ] ) ) {
+                continue;
+            }
             $this->export_table_structure_only( $gz, $table );
         }
 
@@ -716,17 +860,42 @@ class Mighty_Backup_Database_Exporter {
         $order_item_ids = $this->get_order_item_ids( $order_ids );
 
         foreach ( $special['order_tables'] as $table => $id_column ) {
+            if ( isset( $this->excluded_tables[ $table ] ) ) {
+                continue;
+            }
+            if ( isset( $this->structure_only_tables[ $table ] ) ) {
+                $this->export_table_structure_only( $gz, $table );
+                continue;
+            }
             $id_list = ( $id_column === 'order_item_id' ) ? $order_item_ids : $order_ids;
             $this->export_table_filtered( $gz, $table, $id_column, $id_list );
         }
 
-        // Legacy posts/postmeta handling.
+        // Legacy posts/postmeta handling — honor user overrides.
         if ( ! empty( $special['legacy'] ) ) {
-            $this->export_table_posts_streamlined( $gz, $wpdb->posts, $order_ids );
-            $this->export_table_postmeta_streamlined( $gz, $wpdb->postmeta, $order_ids );
+            $this->emit_streamlined_legacy_table( $gz, $wpdb->posts, $order_ids, 'posts' );
+            $this->emit_streamlined_legacy_table( $gz, $wpdb->postmeta, $order_ids, 'postmeta' );
         }
 
         $this->write( $gz, "\nSET FOREIGN_KEY_CHECKS = 1;\nCOMMIT;\n" );
+    }
+
+    /**
+     * Emit a legacy streamlined table (posts/postmeta) while honoring user overrides.
+     */
+    private function emit_streamlined_legacy_table( $gz, string $table, array $order_ids, string $which ): void {
+        if ( isset( $this->excluded_tables[ $table ] ) ) {
+            return;
+        }
+        if ( isset( $this->structure_only_tables[ $table ] ) ) {
+            $this->export_table_structure_only( $gz, $table );
+            return;
+        }
+        if ( $which === 'posts' ) {
+            $this->export_table_posts_streamlined( $gz, $table, $order_ids );
+        } else {
+            $this->export_table_postmeta_streamlined( $gz, $table, $order_ids );
+        }
     }
 
     // ──────────────────────────────────────────────

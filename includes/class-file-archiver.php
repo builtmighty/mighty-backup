@@ -33,6 +33,12 @@ class Mighty_Backup_File_Archiver {
         // Production drop-in files (host-specific, break dev environments).
         'wp-content/object-cache.php',
         'wp-content/advanced-cache.php',
+
+        // Hosting-managed SQL snapshots (WP Engine, Pressable). Redundant —
+        // Mighty Backup generates its own DB dump separately — and racy: the
+        // host rotates the file, causing fopen() to fail intermittently even
+        // when is_readable() returns true. Keep this excluded by default.
+        'wp-content/mysql.sql',
     ];
 
     private Mighty_Backup_Settings $settings;

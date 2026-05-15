@@ -240,6 +240,19 @@
         $btn.val('Saving...').addClass('mb-saving');
     });
 
+    // --- Per-Table Exclusion: Structure → Data linkage ---
+    // Unchecking Structure also unchecks and disables Data.
+    // Re-checking Structure re-enables Data (left unchecked until user re-checks).
+    $('.mb-table-exclusions').on('change', '.mb-table-structure', function () {
+        var $row  = $(this).closest('.mb-table-exclusion-item');
+        var $data = $row.find('.mb-table-data');
+        if (!this.checked) {
+            $data.prop('checked', false).prop('disabled', true);
+        } else {
+            $data.prop('disabled', false);
+        }
+    });
+
     // --- Test Connection ---
 
     $('#mb-test-connection').on('click', function () {

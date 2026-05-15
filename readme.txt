@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.10.0
+Stable tag: 2.12.0
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,14 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.12.0 =
+* Added onboarding wizard (`admin/views/onboarding-wizard.php`) — five-step chip flow covering Storage Credentials, GitHub Integration, Backup Schedule, Codespace Settings, and Notifications, so new installs see a guided setup instead of an empty settings page
+* Added error translator (`includes/class-error-translator.php`) — maps raw exception messages and AWS error codes to human-readable explanations with remediation hints and deep-links into the relevant settings tab, surfaced across the live log, backup history, and AJAX response banners
+* Added backup history logger (`includes/class-logger.php`) — custom database table records every backup with type, trigger source, status, timing, file sizes, remote object keys, and error messages for audit/troubleshooting
+* Added per-table database export controls — settings page lets you exclude specific tables outright or export them structure-only (schema, no rows); new tables are included by default unless explicitly opted out
+* Added tar archive post-verification — file archiver walks the tar.gz end-to-end after creation (shell `tar -tzf` when available, streaming PHP gzip+tar header parser as fallback) to catch archive desync before upload to Spaces
+* Fixed database exporter respecting per-table overrides — exclusions and structure-only flags now propagate through the chunked export path, with skipped tables removed from progress counts so the bar no longer overshoots
 
 = 2.10.0 =
 * Added independent daily retention cron (`mighty_backup_retention`) — decouples cleanup from backup success so a streak of failed nightly backups can no longer let old objects accumulate on Spaces; the in-chain `step_cleanup` is preserved as the optimal "right after a fresh backup" prune

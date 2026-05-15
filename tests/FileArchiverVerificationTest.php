@@ -151,6 +151,15 @@ class FileArchiverVerificationTest extends TestCase {
         $this->call_private( $archiver, 'verify_archive_structure_php', [ $path ] );
     }
 
+    public function test_mysql_sql_is_excluded_by_default(): void {
+        // Hosting-managed mysql.sql (WP Engine, Pressable) must stay in the
+        // default exclusion list — otherwise the fopen-failure guard fires
+        // on every backup against those hosts. See v2.11.2 plan.
+        $rc   = new ReflectionClass( Mighty_Backup_File_Archiver::class );
+        $excl = $rc->getReflectionConstant( 'DEFAULT_EXCLUSIONS' )->getValue();
+        $this->assertContains( 'wp-content/mysql.sql', $excl );
+    }
+
     public function test_verifier_rejects_single_zero_block(): void {
         // Pathological: exactly ONE zero block at the end. Some tar
         // implementations accept this, but it's a sign of corruption.

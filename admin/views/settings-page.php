@@ -344,6 +344,73 @@ $recent              = $history_result['items'];
                 </tr>
             </table>
 
+            <h2><?php esc_html_e( 'Database Tables', 'mighty-backup' ); ?></h2>
+            <table class="form-table">
+                <tr>
+                    <th scope="row">
+                        <?php esc_html_e( 'Per-Table Inclusion', 'mighty-backup' ); ?>
+                        <?php mighty_backup_help_icon( __( 'Both checkboxes default to checked (full export). Uncheck "Data" to back up structure only. Uncheck both to skip the table entirely. New tables added later are included automatically.', 'mighty-backup' ) ); ?>
+                    </th>
+                    <td>
+                        <?php
+                        $excluded_lookup = array_fill_keys( (array) ( $settings['excluded_tables'] ?? [] ), true );
+                        $struct_lookup   = array_fill_keys( (array) ( $settings['structure_only_tables'] ?? [] ), true );
+                        ?>
+                        <div class="mb-table-exclusions">
+                            <div class="mb-table-exclusions-header">
+                                <span class="mb-table-exclusions-name-col"><?php esc_html_e( 'Table', 'mighty-backup' ); ?></span>
+                                <span class="mb-table-exclusions-check-col"><?php esc_html_e( 'Structure', 'mighty-backup' ); ?></span>
+                                <span class="mb-table-exclusions-check-col"><?php esc_html_e( 'Data', 'mighty-backup' ); ?></span>
+                            </div>
+                            <div class="mb-table-exclusions-list">
+                                <?php if ( empty( $tables_with_size ) ) : ?>
+                                    <div class="mb-table-exclusion-empty">
+                                        <?php esc_html_e( 'No tables found.', 'mighty-backup' ); ?>
+                                    </div>
+                                <?php else : ?>
+                                    <?php foreach ( $tables_with_size as $table => $size_bytes ) :
+                                        $is_excluded       = isset( $excluded_lookup[ $table ] );
+                                        $is_structure_only = isset( $struct_lookup[ $table ] );
+                                        $structure_checked = ! $is_excluded;
+                                        $data_checked      = ! $is_excluded && ! $is_structure_only;
+                                        ?>
+                                        <div class="mb-table-exclusion-item">
+                                            <input type="hidden"
+                                                   name="bm_backup_settings[table_list][]"
+                                                   value="<?php echo esc_attr( $table ); ?>" />
+                                            <span class="mb-table-name">
+                                                <?php echo esc_html( $table ); ?>
+                                                <span class="mb-table-size"><?php echo esc_html( size_format( $size_bytes ) ); ?></span>
+                                            </span>
+                                            <label class="mb-table-exclusion-check">
+                                                <input type="checkbox"
+                                                       class="mb-table-structure"
+                                                       data-table="<?php echo esc_attr( $table ); ?>"
+                                                       name="bm_backup_settings[table_structure][<?php echo esc_attr( $table ); ?>]"
+                                                       value="1"
+                                                       <?php checked( $structure_checked ); ?> />
+                                            </label>
+                                            <label class="mb-table-exclusion-check">
+                                                <input type="checkbox"
+                                                       class="mb-table-data"
+                                                       data-table="<?php echo esc_attr( $table ); ?>"
+                                                       name="bm_backup_settings[table_data][<?php echo esc_attr( $table ); ?>]"
+                                                       value="1"
+                                                       <?php checked( $data_checked ); ?>
+                                                       <?php disabled( ! $structure_checked ); ?> />
+                                            </label>
+                                        </div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <p class="description">
+                            <?php esc_html_e( 'Both boxes checked = full export (default). Structure only = schema with no data. Both unchecked = table skipped.', 'mighty-backup' ); ?>
+                        </p>
+                    </td>
+                </tr>
+            </table>
+
             <h2><?php esc_html_e( 'Notifications', 'mighty-backup' ); ?></h2>
             <table class="form-table">
                 <tr>

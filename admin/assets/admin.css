@@ -732,3 +732,75 @@ body.admin-color-ectoplasm .mb-backup-wrap {
         padding: 6px 4px;
     }
 }
+
+/* --- Per-Table Exclusion List --- */
+
+.mb-table-exclusions {
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    background: #fff;
+    max-width: 640px;
+}
+
+.mb-table-exclusions-header,
+.mb-table-exclusion-item {
+    display: grid;
+    grid-template-columns: 1fr 90px 90px;
+    align-items: center;
+    padding: 6px 12px;
+}
+
+.mb-table-exclusions-header {
+    background: #f6f7f7;
+    font-weight: 600;
+    border-bottom: 1px solid #c3c4c7;
+    font-size: 12px;
+    text-transform: uppercase;
+    color: #50575e;
+}
+
+.mb-table-exclusions-check-col {
+    text-align: center;
+}
+
+.mb-table-exclusions-list {
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.mb-table-exclusion-item {
+    border-bottom: 1px solid #f0f0f1;
+}
+
+.mb-table-exclusion-item:last-child {
+    border-bottom: none;
+}
+
+.mb-table-exclusion-item:nth-child(even) {
+    background: #fafafa;
+}
+
+.mb-table-name {
+    font-family: Consolas, Monaco, monospace;
+    font-size: 13px;
+}
+
+.mb-table-size {
+    color: #787c82;
+    font-size: 12px;
+    font-family: inherit;
+    margin-left: 8px;
+}
+
+.mb-table-exclusion-check {
+    display: flex;
+    justify-content: center;
+    margin: 0;
+}
+
+.mb-table-exclusion-empty {
+    padding: 12px;
+    color: #787c82;
+    font-style: italic;
+    text-align: center;
+}

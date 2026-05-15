@@ -142,7 +142,8 @@ class Mighty_Backup_Settings {
         } else {
             $action = 'options.php';
         }
-        $settings = $this->get_all();
+        $settings         = $this->get_all();
+        $tables_with_size = $this->get_tables_with_size();
         include MIGHTY_BACKUP_DIR . 'admin/views/settings-page.php';
     }
 
@@ -251,7 +252,79 @@ class Mighty_Backup_Settings {
             $sanitized['github_pat_enc'] = $current['github_pat_enc'] ?? '';
         }
 
+        // Per-table exclusions.
+        //
+        // Form shape:
+        //   table_list[]                  — every table rendered on the form (source of truth for "what was shown").
+        //   table_structure[<table>] = 1  — present when the Structure box is checked.
+        //   table_data[<table>] = 1       — present when the Data box is checked.
+        //
+        // Storing exclusions (rather than inclusions) means any table absent from
+        // both arrays is implicitly fully exported — so new tables created after
+        // a save are included automatically with no migration.
+        $submitted_list  = (array) ( $input['table_list'] ?? [] );
+        $submitted_struct = (array) ( $input['table_structure'] ?? [] );
+        $submitted_data   = (array) ( $input['table_data'] ?? [] );
+
+        $excluded       = [];
+        $structure_only = [];
+        if ( ! empty( $submitted_list ) ) {
+            global $wpdb;
+            $live_tables = (array) $wpdb->get_col( 'SHOW TABLES' );
+            $live_lookup = array_fill_keys( $live_tables, true );
+
+            foreach ( $submitted_list as $raw_table ) {
+                $table = sanitize_key( (string) $raw_table );
+                if ( $table === '' || ! isset( $live_lookup[ $table ] ) ) {
+                    continue; // Unknown / stale entry — skip.
+                }
+                $has_struct = ! empty( $submitted_struct[ $table ] );
+                $has_data   = ! empty( $submitted_data[ $table ] );
+
+                if ( ! $has_struct ) {
+                    $excluded[] = $table;
+                } elseif ( ! $has_data ) {
+                    $structure_only[] = $table;
+                }
+            }
+
+            $sanitized['excluded_tables']       = array_values( array_unique( $excluded ) );
+            $sanitized['structure_only_tables'] = array_values( array_unique( $structure_only ) );
+        } else {
+            // Form didn't submit the table section (e.g. multisite save before
+            // the field was added) — preserve whatever was already saved.
+            $sanitized['excluded_tables']       = (array) ( $current['excluded_tables'] ?? [] );
+            $sanitized['structure_only_tables'] = (array) ( $current['structure_only_tables'] ?? [] );
+        }
+
         return $sanitized;
+    }
+
+    /**
+     * Return all database tables with their on-disk size in bytes.
+     *
+     * Used by the settings page to render the per-table inclusion list.
+     * One information_schema query, no per-row overhead.
+     *
+     * @return array<string,int> Map of table_name => size_bytes, sorted by name.
+     */
+    public function get_tables_with_size(): array {
+        global $wpdb;
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT TABLE_NAME, (DATA_LENGTH + INDEX_LENGTH) AS size_bytes
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = %s
+             ORDER BY TABLE_NAME ASC",
+            DB_NAME
+        ), ARRAY_A );
+
+        $out = [];
+        if ( is_array( $rows ) ) {
+            foreach ( $rows as $row ) {
+                $out[ $row['TABLE_NAME'] ] = (int) $row['size_bytes'];
+            }
+        }
+        return $out;
     }
 
     /**
@@ -283,6 +356,8 @@ class Mighty_Backup_Settings {
             'github_owner'          => '',
             'github_repo'           => '',
             'github_pat_enc'        => '',
+            'excluded_tables'       => [],
+            'structure_only_tables' => [],
         ];
 
         $saved = get_site_option( self::OPTION_KEY, [] );
