@@ -212,6 +212,18 @@ class Mighty_Backup_Error_Translator {
                 'suggestion'      => 'The plugin will fall back to a slower PHP-based export. To re-enable mysqldump, ask the host to install the mariadb-client or mysql-client package.',
                 'settings_anchor' => null,
             ],
+            [
+                'match'           => '/Maximum execution time of \d+ seconds? exceeded|max_execution_time/i',
+                'human'           => 'PHP hit its max_execution_time limit during database export.',
+                'suggestion'      => 'A single batch of rows took longer than the host\'s PHP time cap. Lower the Chunk Seconds value in Settings → Schedule → Advanced so the exporter yields sooner between batches. If the table is a log or audit table, marking it structure-only in the Database Tables panel skips its data entirely.',
+                'settings_anchor' => 'schedule',
+            ],
+            [
+                'match'           => '/no primary key.+cannot resume mid-table|Table \S+ has no primary key/i',
+                'human'           => 'A large table without a primary key cannot be resumed mid-export.',
+                'suggestion'      => 'Mighty Backup uses the primary key to safely continue exporting big tables across multiple chunks. Either add a primary key to the table, or mark it structure-only / excluded in Settings → Schedule → Database Tables (recommended for log and audit tables).',
+                'settings_anchor' => 'schedule',
+            ],
 
             // --- tar / file archive ---
             [

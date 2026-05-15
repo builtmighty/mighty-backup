@@ -441,6 +441,43 @@ $recent              = $history_result['items'];
                 </tr>
             </table>
 
+            <details class="mb-advanced-disclosure">
+                <summary><?php esc_html_e( 'Advanced — large-site DB export tuning', 'mighty-backup' ); ?></summary>
+                <p class="description">
+                    <?php esc_html_e( 'Defaults work for most sites. Adjust these only when a backup fails on a single large table or you have unusually generous PHP time limits.', 'mighty-backup' ); ?>
+                </p>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row">
+                            <label for="bm_db_chunk_seconds"><?php esc_html_e( 'Chunk Seconds', 'mighty-backup' ); ?></label>
+                            <?php mighty_backup_help_icon( __( 'Soft wall-time budget for each Action Scheduler chunk during PHP-based database export. The exporter yields between SQL batches once this limit is reached, then resumes mid-table in the next chunk. Lower for hosts with short PHP max_execution_time caps (Kinsta is typically 60s); raise on hosts with multi-minute caps to reduce chunk overhead on huge tables.', 'mighty-backup' ) ); ?>
+                        </th>
+                        <td>
+                            <input type="number" id="bm_db_chunk_seconds"
+                                   name="bm_backup_settings[db_chunk_seconds]"
+                                   value="<?php echo esc_attr( (int) ( $settings['db_chunk_seconds'] ?? 30 ) ); ?>"
+                                   min="10" max="300" step="5"
+                                   class="small-text" />
+                            <span class="description"><?php esc_html_e( 'seconds (10–300, default 30)', 'mighty-backup' ); ?></span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">
+                            <label for="bm_db_large_table_threshold_mb"><?php esc_html_e( 'Large-Table Threshold', 'mighty-backup' ); ?></label>
+                            <?php mighty_backup_help_icon( __( 'On the mysqldump path, tables larger than this are exported across multiple chunks using --where ranges instead of a single monolithic invocation. Below the threshold, mysqldump runs once per table (faster on small/medium sites). Has no effect on the PHP-based export path, which always chunks.', 'mighty-backup' ) ); ?>
+                        </th>
+                        <td>
+                            <input type="number" id="bm_db_large_table_threshold_mb"
+                                   name="bm_backup_settings[db_large_table_threshold_mb]"
+                                   value="<?php echo esc_attr( (int) ( $settings['db_large_table_threshold_mb'] ?? 1024 ) ); ?>"
+                                   min="128" max="10240" step="64"
+                                   class="small-text" />
+                            <span class="description"><?php esc_html_e( 'MB (128–10240, default 1024 = 1 GB)', 'mighty-backup' ); ?></span>
+                        </td>
+                    </tr>
+                </table>
+            </details>
+
             <?php submit_button(); ?>
         </div><!-- /schedule -->
 

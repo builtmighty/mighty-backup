@@ -33,6 +33,8 @@ class Mighty_Backup_Settings {
         'notify_on_failure'  => [ 'type' => 'bool',   'storage' => 'notify_on_failure' ],
         'notification_email' => [ 'type' => 'email',  'storage' => 'notification_email' ],
         'streamlined_mode'   => [ 'type' => 'bool',   'storage' => 'streamlined_mode' ],
+        'db_chunk_seconds'           => [ 'type' => 'int', 'min' => 10,  'max' => 300,   'storage' => 'db_chunk_seconds' ],
+        'db_large_table_threshold_mb' => [ 'type' => 'int', 'min' => 128, 'max' => 10240, 'storage' => 'db_large_table_threshold_mb' ],
         'github_owner'       => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'github_owner' ],
         'github_repo'        => [ 'type' => 'string', 'encrypted' => false, 'storage' => 'github_repo' ],
         'github_pat'         => [ 'type' => 'string', 'encrypted' => true,  'storage' => 'github_pat_enc' ],
@@ -240,6 +242,20 @@ class Mighty_Backup_Settings {
         // Database export mode.
         $sanitized['streamlined_mode'] = ! empty( $input['streamlined_mode'] );
 
+        // Advanced DB-export tuning. Clamp into the meta-declared range so an
+        // out-of-band value can't break the chunking heuristics.
+        $chunk_meta = self::KEY_META['db_chunk_seconds'];
+        $sanitized['db_chunk_seconds'] = max(
+            $chunk_meta['min'],
+            min( $chunk_meta['max'], (int) ( $input['db_chunk_seconds'] ?? 30 ) )
+        );
+
+        $thresh_meta = self::KEY_META['db_large_table_threshold_mb'];
+        $sanitized['db_large_table_threshold_mb'] = max(
+            $thresh_meta['min'],
+            min( $thresh_meta['max'], (int) ( $input['db_large_table_threshold_mb'] ?? 1024 ) )
+        );
+
         // GitHub (Devcontainer).
         $sanitized['github_owner'] = sanitize_text_field( $input['github_owner'] ?? '' );
         $sanitized['github_repo']  = sanitize_text_field( $input['github_repo'] ?? '' );
@@ -353,6 +369,8 @@ class Mighty_Backup_Settings {
             'notification_email'    => '',
             'hosting_provider'      => '',
             'streamlined_mode'      => false,
+            'db_chunk_seconds'      => 30,
+            'db_large_table_threshold_mb' => 1024,
             'github_owner'          => '',
             'github_repo'           => '',
             'github_pat_enc'        => '',
@@ -541,6 +559,11 @@ class Mighty_Backup_Settings {
                 if ( isset( $meta['min'] ) && $int < $meta['min'] ) {
                     throw new \InvalidArgumentException(
                         sprintf( 'Value for "%s" must be >= %d.', $key, $meta['min'] )
+                    );
+                }
+                if ( isset( $meta['max'] ) && $int > $meta['max'] ) {
+                    throw new \InvalidArgumentException(
+                        sprintf( 'Value for "%s" must be <= %d.', $key, $meta['max'] )
                     );
                 }
                 return $int;

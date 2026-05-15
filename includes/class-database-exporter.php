@@ -26,6 +26,13 @@ class Mighty_Backup_Database_Exporter {
     private array $structure_only_tables = [];
 
     /**
+     * Pre-flight table sizes (table_name => bytes). Populated once before the
+     * first chunk via set_table_sizes() and used by the chunk loop to emit
+     * per-table progress lines. Empty when running outside the chunked path.
+     */
+    private array $table_sizes = [];
+
+    /**
      * Write function — 'gzwrite' for gzip handles, 'fwrite' for plain files.
      * Toggled by export_tables_chunk() / finalize_export() for the chunked path.
      */
@@ -51,6 +58,300 @@ class Mighty_Backup_Database_Exporter {
     }
 
     /**
+     * Hand the exporter a pre-flight size map so the chunk loop can log each
+     * table's size as it starts. Backup Manager captures this once on the first
+     * chunk and replays it into a fresh exporter instance on each subsequent
+     * chunk. Missing entries are tolerated (size logged as unknown).
+     *
+     * @param array<string, int> $sizes Map of table_name => bytes.
+     */
+    public function set_table_sizes( array $sizes ): void {
+        $this->table_sizes = $sizes;
+    }
+
+    /**
+     * Filter a size map to tables exceeding a byte threshold. Used by Backup
+     * Manager to decide whether the mysqldump path needs --where range
+     * chunking, and to drive the list of big-table loops. Excluded and
+     * structure-only tables are dropped — both already have their data
+     * suppressed by the chunked mysqldump path's small-tables invocation,
+     * and treating them as "big" would dump their data anyway via the range
+     * loop, contradicting the user's setting.
+     *
+     * @param array<string, int> $sizes      Map of table_name => bytes.
+     * @param int                $threshold  Minimum size to be considered "large", in bytes.
+     * @return array<string, int> Same map, filtered, preserving original order.
+     */
+    public function get_large_tables( array $sizes, int $threshold ): array {
+        $out = [];
+        foreach ( $sizes as $table => $bytes ) {
+            if ( $bytes < $threshold ) {
+                continue;
+            }
+            if ( isset( $this->excluded_tables[ $table ] ) ) {
+                continue;
+            }
+            if ( isset( $this->structure_only_tables[ $table ] ) ) {
+                continue;
+            }
+            $out[ $table ] = $bytes;
+        }
+        return $out;
+    }
+
+    /**
+     * Look up MIN/MAX of a table's primary key. Used once per big table to
+     * bound the range-chunking loop. Returns nulls if the table is empty.
+     *
+     * @return array{min: mixed, max: mixed}
+     */
+    public function get_pk_bounds( string $table, string $pk_column ): array {
+        global $wpdb;
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $row = $wpdb->get_row(
+            "SELECT MIN(`{$pk_column}`) AS min_pk, MAX(`{$pk_column}`) AS max_pk FROM `{$table}`",
+            ARRAY_A
+        );
+        return [
+            'min' => $row['min_pk'] ?? null,
+            'max' => $row['max_pk'] ?? null,
+        ];
+    }
+
+    /**
+     * Public detection of a single-column primary key. Exposed for the chunked
+     * mysqldump path so Backup Manager can decide upfront whether a big table
+     * can be range-chunked at all.
+     */
+    public function get_table_primary_key( string $table ): ?string {
+        return $this->get_primary_key( $table );
+    }
+
+    /**
+     * Invoke mysqldump for every table except those in $ignore_tables, appending
+     * the dump to $raw_path. Used by the chunked mysqldump path to clear all
+     * small tables in a single invocation, leaving big tables for ranged dumps.
+     *
+     * Structure-only and excluded tables are appended to $ignore_tables before
+     * the mysqldump call; structure-only tables get their CREATE statement
+     * written separately afterward.
+     */
+    public function dump_small_tables_via_mysqldump(
+        string $raw_path,
+        array $ignore_tables,
+        array $structure_only_tables = []
+    ): void {
+        $bin       = $this->get_dump_binary();
+        $defaults  = $this->write_mysql_defaults();
+        $err_path  = $raw_path . '.err';
+        $all_ignore = array_unique( array_merge(
+            $ignore_tables,
+            $structure_only_tables,
+            array_keys( $this->excluded_tables )
+        ) );
+        $ignore_flags = $this->build_ignore_flags( $all_ignore );
+
+        try {
+            $command = sprintf(
+                '%s --defaults-extra-file=%s --single-transaction --quick --skip-lock-tables --set-charset '
+                . '--default-character-set=utf8mb4 --no-tablespaces '
+                . '%s %s >> %s 2>%s',
+                escapeshellcmd( $bin ),
+                escapeshellarg( $defaults ),
+                $ignore_flags,
+                escapeshellarg( DB_NAME ),
+                escapeshellarg( $raw_path ),
+                escapeshellarg( $err_path )
+            );
+
+            exec( $command, $output, $return_code );
+
+            $stderr = file_exists( $err_path ) ? (string) file_get_contents( $err_path ) : '';
+            @unlink( $err_path );
+            $stderr = $this->filter_dump_stderr( $stderr );
+
+            if ( $return_code !== 0 ) {
+                throw new \Exception( "{$bin} (small-tables dump) failed (exit {$return_code}): {$stderr}" );
+            }
+
+            // Append CREATE TABLE for each structure-only table.
+            foreach ( $structure_only_tables as $table ) {
+                $this->dump_table_schema_only_via_mysqldump( $raw_path, $table );
+            }
+        } finally {
+            @unlink( $defaults );
+        }
+    }
+
+    /**
+     * Append a single table's CREATE statement (no data) to $raw_path. Invoked
+     * once per big table at the top of its range loop so the ranged INSERTs
+     * have a target schema, and once per structure-only table after the small
+     * batch dump.
+     */
+    public function dump_table_schema_only_via_mysqldump( string $raw_path, string $table ): void {
+        $bin      = $this->get_dump_binary();
+        $defaults = $this->write_mysql_defaults();
+        $err_path = $raw_path . '.err';
+
+        try {
+            $command = sprintf(
+                '%s --defaults-extra-file=%s --no-data --single-transaction --skip-lock-tables --set-charset '
+                . '--default-character-set=utf8mb4 --no-tablespaces '
+                . '%s %s >> %s 2>%s',
+                escapeshellcmd( $bin ),
+                escapeshellarg( $defaults ),
+                escapeshellarg( DB_NAME ),
+                escapeshellarg( $table ),
+                escapeshellarg( $raw_path ),
+                escapeshellarg( $err_path )
+            );
+
+            exec( $command, $output, $return_code );
+
+            $stderr = file_exists( $err_path ) ? (string) file_get_contents( $err_path ) : '';
+            @unlink( $err_path );
+            $stderr = $this->filter_dump_stderr( $stderr );
+
+            if ( $return_code !== 0 ) {
+                throw new \Exception( "{$bin} (schema-only for {$table}) failed (exit {$return_code}): {$stderr}" );
+            }
+        } finally {
+            @unlink( $defaults );
+        }
+    }
+
+    /**
+     * Dump one PK range of a single table as INSERT statements (no DDL),
+     * appending to $raw_path. The caller chooses the start/end bounds and
+     * uses the returned elapsed time to size the next range adaptively.
+     *
+     * @return array{elapsed: float} Wall-time spent inside mysqldump for adaptive range sizing.
+     */
+    public function dump_table_range_via_mysqldump(
+        string $raw_path,
+        string $table,
+        string $pk_column,
+        $start_after_pk,
+        $end_pk_inclusive
+    ): array {
+        $bin      = $this->get_dump_binary();
+        $defaults = $this->write_mysql_defaults();
+        $err_path = $raw_path . '.err';
+
+        $where = sprintf(
+            '`%s` > %s AND `%s` <= %s',
+            $pk_column,
+            $this->quote_pk_value( $start_after_pk ),
+            $pk_column,
+            $this->quote_pk_value( $end_pk_inclusive )
+        );
+
+        $started = microtime( true );
+
+        try {
+            $command = sprintf(
+                '%s --defaults-extra-file=%s --no-create-info --skip-add-drop-table --single-transaction '
+                . '--quick --skip-lock-tables --set-charset --default-character-set=utf8mb4 --no-tablespaces '
+                . '--where=%s %s %s >> %s 2>%s',
+                escapeshellcmd( $bin ),
+                escapeshellarg( $defaults ),
+                escapeshellarg( $where ),
+                escapeshellarg( DB_NAME ),
+                escapeshellarg( $table ),
+                escapeshellarg( $raw_path ),
+                escapeshellarg( $err_path )
+            );
+
+            exec( $command, $output, $return_code );
+
+            $stderr = file_exists( $err_path ) ? (string) file_get_contents( $err_path ) : '';
+            @unlink( $err_path );
+            $stderr = $this->filter_dump_stderr( $stderr );
+
+            if ( $return_code !== 0 ) {
+                throw new \Exception( "{$bin} (range dump of {$table}) failed (exit {$return_code}): {$stderr}" );
+            }
+
+            return [ 'elapsed' => microtime( true ) - $started ];
+        } finally {
+            @unlink( $defaults );
+        }
+    }
+
+    /**
+     * Quote a primary-key value safely for inclusion in a --where clause.
+     * Integers stay numeric; anything else is single-quoted with escaping.
+     */
+    private function quote_pk_value( $value ): string {
+        global $wpdb;
+        if ( is_int( $value ) || ( is_string( $value ) && ctype_digit( $value ) ) ) {
+            return (string) $value;
+        }
+        return "'" . esc_sql( (string) $value ) . "'";
+    }
+
+    /**
+     * Finalize a chunked mysqldump export: sanitize wpdb placeholder tokens if
+     * configured, then gzip raw → output. Does NOT call finalize_export — the
+     * PHP-path postamble (`SET FOREIGN_KEY_CHECKS=1; COMMIT;`) would be tacked
+     * on after mysqldump's own state-restore block, which is redundant and
+     * could land outside an active transaction.
+     */
+    public function finalize_mysqldump_chunked( string $raw_path, string $output_path ): int {
+        $sanitize = (bool) apply_filters( 'mighty_backup_sanitize_placeholder_hashes', true );
+
+        if ( $sanitize ) {
+            $this->sanitize_and_gzip( $raw_path, $output_path, $this->get_gzip_level(), [] );
+        } else {
+            // Stream raw → gzip directly, no sanitization pass.
+            $gz = gzopen( $output_path, 'wb' . $this->get_gzip_level() );
+            if ( ! $gz ) {
+                throw new \Exception( "Failed to open output file for compression: {$output_path}" );
+            }
+            $in = fopen( $raw_path, 'rb' );
+            if ( ! $in ) {
+                gzclose( $gz );
+                throw new \Exception( "Failed to read raw SQL: {$raw_path}" );
+            }
+            try {
+                while ( ! feof( $in ) ) {
+                    $buf = fread( $in, 65536 );
+                    if ( $buf === false || $buf === '' ) {
+                        break;
+                    }
+                    gzwrite( $gz, $buf );
+                }
+            } finally {
+                fclose( $in );
+                gzclose( $gz );
+            }
+        }
+
+        @unlink( $raw_path );
+        $size = filesize( $output_path );
+        return $size !== false ? (int) $size : 0;
+    }
+
+    /**
+     * Write the SQL preamble to a fresh raw file. Called once at the start of
+     * the chunked mysqldump path. The mysqldump output itself doesn't include
+     * the same `SET FOREIGN_KEY_CHECKS=0` framing we use for the PHP path, so
+     * we prepend ours and rely on `--no-tablespaces`/`--set-charset` for the
+     * rest.
+     */
+    public function write_chunked_mysqldump_preamble( string $raw_path ): void {
+        $fh = fopen( $raw_path, 'wb' );
+        if ( ! $fh ) {
+            throw new \Exception( "Failed to open raw SQL file for writing: {$raw_path}" );
+        }
+        $this->writer = 'fwrite';
+        $this->write_preamble( $fh );
+        $this->writer = 'gzwrite';
+        fclose( $fh );
+    }
+
+    /**
      * Resolve a table's export mode based on user overrides.
      *
      * @return string 'skip', 'structure_only', or 'full'.
@@ -70,6 +371,25 @@ class Mighty_Backup_Database_Exporter {
      */
     private function has_table_overrides(): bool {
         return ! empty( $this->excluded_tables ) || ! empty( $this->structure_only_tables );
+    }
+
+    /**
+     * Emit one log line as a table begins exporting in the chunked path, with
+     * its on-disk size when known. Makes "stuck on big table" obvious in the
+     * live log and gives admins a signal for which tables to mark structure-only.
+     */
+    private function log_table_start( string $table, string $mode ): void {
+        if ( ! class_exists( 'Mighty_Backup_Log_Stream' ) ) {
+            return;
+        }
+        $size_str = isset( $this->table_sizes[ $table ] ) && $this->table_sizes[ $table ] > 0
+            ? size_format( $this->table_sizes[ $table ] )
+            : '';
+        $suffix = $mode === 'structure_only' ? ' — structure only' : '';
+        $line   = $size_str
+            ? "Table {$table}: {$size_str}{$suffix}"
+            : "Table {$table}{$suffix}";
+        Mighty_Backup_Log_Stream::add( $line );
     }
 
     /**
@@ -170,15 +490,18 @@ class Mighty_Backup_Database_Exporter {
      *
      * Called repeatedly by the Backup Manager across multiple Action Scheduler
      * actions. Each invocation processes tables until the time threshold is
-     * reached, then returns so the next action can continue.
+     * reached, then returns so the next action can continue. Mid-table
+     * resumption is supported for tables with a single-column primary key via
+     * the $resume parameter — see export_table().
      *
      * @param string     $raw_path          Path to the raw .sql file (created/appended).
      * @param string[]   $tables            Full ordered list of table names.
-     * @param int        $start_index       Index of the first table to export in this chunk.
+     * @param int        $start_index       Index of the first table to process in this chunk. When $resume is non-null, $tables[$start_index] is the table being resumed.
      * @param int        $chunk_seconds     Max seconds before yielding (0 = no limit).
      * @param bool       $write_preamble    Whether to write the SQL preamble (first chunk only).
      * @param array|null $streamlined_config Cached result of get_streamlined_config(), or null for full export.
-     * @return int Index of the next table to export (equals count($tables) when done).
+     * @param array|null $resume            {pk_column, last_pk} to resume the table at $start_index mid-export, or null for fresh-table start.
+     * @return array{next_index: int, partial: ?array{pk_column: string, last_pk: mixed}} next_index is where the next chunk should resume; partial is non-null only when the chunk paused mid-table and the next chunk must re-enter $tables[next_index] with the resume token.
      */
     public function export_tables_chunk(
         string $raw_path,
@@ -186,8 +509,9 @@ class Mighty_Backup_Database_Exporter {
         int $start_index,
         int $chunk_seconds,
         bool $write_preamble,
-        ?array $streamlined_config = null
-    ): int {
+        ?array $streamlined_config = null,
+        ?array $resume = null
+    ): array {
         $fh = fopen( $raw_path, 'ab' );
         if ( ! $fh ) {
             throw new \Exception( "Failed to open raw SQL file for writing: {$raw_path}" );
@@ -224,34 +548,74 @@ class Mighty_Backup_Database_Exporter {
                         fclose( $fh );
                         $this->writer = 'gzwrite';
                         $this->emit_placeholder_warning();
-                        return $i + 1;
+                        return [ 'next_index' => $i + 1, 'partial' => null ];
                     }
                     continue;
+                }
+
+                // Resume token only applies to the first iteration's table — and
+                // only if it matches. After that, $resume is consumed.
+                $table_resume = ( $i === $start_index && $resume !== null && ( $resume['table'] ?? null ) === $table )
+                    ? $resume
+                    : null;
+
+                if ( $table_resume === null ) {
+                    $this->log_table_start( $table, $mode );
+                } else {
+                    // Resuming a partially-exported table; log progress.
+                    if ( class_exists( 'Mighty_Backup_Log_Stream' ) ) {
+                        Mighty_Backup_Log_Stream::add( sprintf(
+                            'Resuming %s from %s > %s',
+                            $table,
+                            $table_resume['pk_column'],
+                            (string) $table_resume['last_pk']
+                        ) );
+                    }
                 }
 
                 if ( $mode === 'structure_only' ) {
                     $this->export_table_structure_only( $fh, $table );
                 } elseif ( $streamlined_config ) {
+                    // Streamlined per-table path is not resumable in this pass —
+                    // its filtered set is held in PHP memory and ordering is not
+                    // guaranteed by PK. Run single-shot, ignore time budget.
                     $this->export_table_chunked_streamlined(
                         $fh, $table, $streamlined_config, $order_ids ?? [], $order_item_ids ?? []
                     );
                 } else {
-                    $this->export_table( $fh, $table );
+                    $result = $this->export_table(
+                        $fh, $table, $table_resume, $started_at, $chunk_seconds
+                    );
+
+                    if ( ! $result['done'] ) {
+                        // Paused mid-table; persist resume token and bail.
+                        fclose( $fh );
+                        $this->writer = 'gzwrite';
+                        $this->emit_placeholder_warning();
+                        return [
+                            'next_index' => $i,
+                            'partial'    => [
+                                'table'     => $table,
+                                'pk_column' => $result['pk_column'],
+                                'last_pk'   => $result['last_pk'],
+                            ],
+                        ];
+                    }
                 }
 
-                // Check time threshold after each table (not mid-table).
+                // Check time threshold after each completed table.
                 if ( $chunk_seconds > 0 && ( time() - $started_at ) >= $chunk_seconds ) {
                     fclose( $fh );
                     $this->writer = 'gzwrite';
                     $this->emit_placeholder_warning();
-                    return $i + 1;
+                    return [ 'next_index' => $i + 1, 'partial' => null ];
                 }
             }
 
             fclose( $fh );
             $this->writer = 'gzwrite';
             $this->emit_placeholder_warning();
-            return $total;
+            return [ 'next_index' => $total, 'partial' => null ];
 
         } catch ( \Throwable $e ) {
             fclose( $fh );
@@ -1456,28 +1820,80 @@ class Mighty_Backup_Database_Exporter {
     /**
      * Export a single table (structure + data).
      */
-    private function export_table( $gz, string $table ): void {
+    /**
+     * Export a single table (DDL + data). Resumable across Action Scheduler
+     * chunks for tables with a single-column primary key.
+     *
+     * When $resume is null (fresh start): writes DROP/CREATE preamble, detects
+     * the primary key, and begins data export from the start. When $resume is
+     * non-null: skips the preamble (already written in a prior chunk) and
+     * continues data export past $resume['last_pk'].
+     *
+     * Time-bounding (via $started_at + $chunk_seconds > 0) only applies to the
+     * keyset-paginated PK path. Tables without a single-column PK run to
+     * completion regardless of budget — pause-and-resume isn't safe with
+     * LIMIT/OFFSET pagination under live writes.
+     *
+     * @param array|null  $resume         {pk_column, last_pk} for mid-table resume, or null for fresh start.
+     * @param int|null    $started_at     Wall-time anchor; null disables time-bounding.
+     * @param int         $chunk_seconds  Soft time budget; 0 disables.
+     * @return array{done: bool, pk_column: ?string, last_pk: mixed} pk_column/last_pk are populated when done=false so the caller can persist resume state.
+     */
+    private function export_table(
+        $gz,
+        string $table,
+        ?array $resume = null,
+        ?int $started_at = null,
+        int $chunk_seconds = 0
+    ): array {
         global $wpdb;
 
-        $this->write( $gz, "--\n-- Table: `{$table}`\n--\n\n" );
-        $this->write( $gz, "DROP TABLE IF EXISTS `{$table}`;\n" );
+        $resuming  = $resume !== null && isset( $resume['pk_column'], $resume['last_pk'] );
+        $pk_column = $resuming ? $resume['pk_column'] : $this->get_primary_key( $table );
 
-        $create = $wpdb->get_row( "SHOW CREATE TABLE `{$table}`", ARRAY_N );
-        if ( ! $create || empty( $create[1] ) ) {
-            $this->write( $gz, "-- WARNING: Could not get CREATE TABLE for `{$table}`\n\n" );
-            return;
+        if ( ! $resuming ) {
+            $this->write( $gz, "--\n-- Table: `{$table}`\n--\n\n" );
+            $this->write( $gz, "DROP TABLE IF EXISTS `{$table}`;\n" );
+
+            $create = $wpdb->get_row( "SHOW CREATE TABLE `{$table}`", ARRAY_N );
+            if ( ! $create || empty( $create[1] ) ) {
+                $this->write( $gz, "-- WARNING: Could not get CREATE TABLE for `{$table}`\n\n" );
+                return [ 'done' => true, 'pk_column' => null, 'last_pk' => null ];
+            }
+            $this->write( $gz, $create[1] . ";\n\n" );
         }
-        $this->write( $gz, $create[1] . ";\n\n" );
-
-        $pk_column = $this->get_primary_key( $table );
 
         if ( $pk_column ) {
-            $this->export_table_data_pk( $gz, $table, $pk_column );
+            $start_after = $resuming ? $resume['last_pk'] : 0;
+            $result      = $this->export_table_data_pk(
+                $gz, $table, $pk_column, $start_after, $started_at, $chunk_seconds
+            );
+
+            if ( ! $result['done'] ) {
+                // Paused mid-table — leave the trailing newline off; it'll be
+                // appended when the table actually completes. SQL is valid
+                // either way since each flushed INSERT ends with ';'.
+                return [
+                    'done'      => false,
+                    'pk_column' => $pk_column,
+                    'last_pk'   => $result['last_pk'],
+                ];
+            }
         } else {
+            // No single-column PK — run to completion in this chunk. The
+            // chunk-time budget is ignored here; LIMIT/OFFSET pagination can't
+            // safely resume under concurrent writes.
+            if ( $chunk_seconds > 0 && class_exists( 'Mighty_Backup_Log_Stream' ) ) {
+                Mighty_Backup_Log_Stream::add(
+                    "Table {$table}: no primary key — exporting single-shot (cannot resume mid-table)"
+                );
+            }
             $this->export_table_data_offset( $gz, $table );
         }
 
         $this->write( $gz, "\n" );
+
+        return [ 'done' => true, 'pk_column' => $pk_column, 'last_pk' => null ];
     }
 
     /**
@@ -1504,14 +1920,30 @@ class Mighty_Backup_Database_Exporter {
     }
 
     /**
-     * Export table data using primary-key-based pagination.
+     * Export table data using primary-key-based pagination. Resumable across
+     * Action Scheduler chunks: pass $start_after_pk to continue past a prior
+     * chunk's last-written row, and pass $chunk_seconds > 0 to bail out cleanly
+     * when the wall-time budget is exhausted between batches.
+     *
+     * @param mixed       $start_after_pk PK threshold; only rows with PK > this are exported. Use 0 to start from the beginning.
+     * @param int|null    $started_at     Wall-time anchor for the time budget (null disables time-bounding).
+     * @param int         $chunk_seconds  Soft time budget; 0 disables (run to completion).
+     * @return array{done: bool, last_pk: mixed} done=true means the table is fully exported.
      */
-    private function export_table_data_pk( $gz, string $table, string $pk_column ): void {
+    private function export_table_data_pk(
+        $gz,
+        string $table,
+        string $pk_column,
+        $start_after_pk = 0,
+        ?int $started_at = null,
+        int $chunk_seconds = 0
+    ): array {
         global $wpdb;
 
         $binary_cols   = $this->get_binary_columns( $table );
-        $last_id       = 0;
+        $last_id       = $start_after_pk;
         $insert_buffer = [];
+        $time_bounded  = $started_at !== null && $chunk_seconds > 0;
 
         while ( true ) {
             // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
@@ -1539,11 +1971,24 @@ class Mighty_Backup_Database_Exporter {
             }
 
             unset( $rows );
+
+            // Time check between row-batches — only after the inner buffer is
+            // flushed so we never split an INSERT statement across chunks. The
+            // last_id we return is the highest PK that has been *durably* written.
+            if ( $time_bounded && ( time() - $started_at ) >= $chunk_seconds ) {
+                if ( ! empty( $insert_buffer ) ) {
+                    $this->flush_inserts( $gz, $table, $insert_buffer );
+                    $insert_buffer = [];
+                }
+                return [ 'done' => false, 'last_pk' => $last_id ];
+            }
         }
 
         if ( ! empty( $insert_buffer ) ) {
             $this->flush_inserts( $gz, $table, $insert_buffer );
         }
+
+        return [ 'done' => true, 'last_pk' => $last_id ];
     }
 
     /**
