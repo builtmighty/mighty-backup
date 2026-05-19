@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.13.0
+Stable tag: 2.13.1
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,11 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.13.1 =
+* Fixed PHP-path database export leaking persisted wpdb placeholder-escape hashes (cross-session `{HASH}` tokens). `build_values_string()` previously called `$wpdb->remove_placeholder_escape()`, which only matches the *current* request's session hash via `str_replace` — tokens minted by prior WordPress sessions fell through verbatim into the dump. The PHP-path row writer now uses the regex-based `Mighty_Backup_Placeholder_Repair::sanitize_string()` already used by the mysqldump streaming path, which matches `\{[a-f0-9]{64}\}` uniformly and also recomputes `s:N:"…"` length prefixes for serialized payloads (ACF flexible content, etc.). Net effect on poisoned databases: backup files come out clean even when the source DB still has tokens.
+* Changed: the `placeholder_strips` counter (surfaced in the live-log warning) now also counts persisted-hash strips. Existing operators will see step-function increases the first time a 2.13.1 export runs over a corrupted DB — this is the new baseline, not a regression. The accompanying log message has been updated to reflect that the backup is clean and to recommend `wp mighty-backup repair placeholders --dry-run` only for cleaning the source DB.
+* Added: per-row filter dispatch is now cached once per export run so the `mighty_backup_sanitize_placeholder_hashes` filter still works as a kill switch without paying `apply_filters` overhead on every column value.
 
 = 2.13.0 =
 * Added mid-table resumable PHP database export — `export_table_data_pk()` now time-checks between SQL batches and persists `{current_table, current_table_pk, current_table_last_pk}` in `db_export` state so a single large table can be sliced across multiple Action Scheduler chunks; survives any reasonable `max_execution_time` cap (the load-bearing fix for 9 GB single-table sites on hosts like Kinsta)

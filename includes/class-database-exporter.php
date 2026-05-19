@@ -42,9 +42,18 @@ class Mighty_Backup_Database_Exporter {
      * Number of wpdb placeholder-escape tokens stripped during this export.
      * wpdb returns values from get_results() with literal '%' replaced by a
      * 64-hex session hash; we must strip these before writing or they get
-     * persisted permanently on re-import.
+     * persisted permanently on re-import. Counter now covers both
+     * current-session and persisted tokens (the regex-based sanitizer matches
+     * any `{<64-hex>}` token uniformly).
      */
     private int $placeholder_strips = 0;
+
+    /**
+     * Cached result of the `mighty_backup_sanitize_placeholder_hashes` filter.
+     * Resolved once per exporter instance (each backup run constructs a fresh
+     * instance) to avoid the filter dispatch overhead in the per-row hot path.
+     */
+    private ?bool $sanitize_hashes_cache = null;
 
     public function __construct(
         bool $streamlined = false,
@@ -435,8 +444,8 @@ class Mighty_Backup_Database_Exporter {
     private function emit_placeholder_warning(): void {
         if ( $this->placeholder_strips > 0 && class_exists( 'Mighty_Backup_Log_Stream' ) ) {
             Mighty_Backup_Log_Stream::add( sprintf(
-                'Stripped %d wpdb placeholder-escape token(s) from PHP-path rows. ' .
-                'If the production DB has persisted hashes, run `wp mighty-backup repair placeholders --dry-run` to check.',
+                'Stripped %d wpdb placeholder-escape token(s) from PHP-path rows (current-session and persisted). ' .
+                'The backup is clean; consider running `wp mighty-backup repair placeholders --dry-run` to scrub the source DB too.',
                 $this->placeholder_strips
             ) );
         }
@@ -2041,8 +2050,6 @@ class Mighty_Backup_Database_Exporter {
      * @param array $binary_cols  Set of column names that are binary types (keys = names).
      */
     private function build_values_string( array $row, array $binary_cols = [] ): string {
-        global $wpdb;
-
         $values = [];
         foreach ( $row as $key => $value ) {
             if ( is_null( $value ) ) {
@@ -2050,8 +2057,18 @@ class Mighty_Backup_Database_Exporter {
             } elseif ( isset( $binary_cols[ $key ] ) && $value !== '' ) {
                 $values[] = '0x' . bin2hex( $value );
             } else {
-                if ( is_string( $value ) ) {
-                    $stripped = $wpdb->remove_placeholder_escape( $value );
+                if ( is_string( $value )
+                    && $this->sanitize_hashes_enabled()
+                    && strpos( $value, '{' ) !== false
+                ) {
+                    // Regex-based sanitizer matches `\{[a-f0-9]{64}\}` — catches
+                    // both the current session's placeholder hash AND persisted
+                    // hashes minted by prior sessions. The session-bound
+                    // wpdb::remove_placeholder_escape() that used to live here
+                    // only handled the former; persisted tokens fell through
+                    // verbatim and got baked into every backup. See
+                    // class-placeholder-repair.php for why the regex is safe.
+                    $stripped = Mighty_Backup_Placeholder_Repair::sanitize_string( $value );
                     if ( $stripped !== $value ) {
                         ++$this->placeholder_strips;
                         $value = $stripped;
@@ -2062,6 +2079,21 @@ class Mighty_Backup_Database_Exporter {
         }
 
         return '(' . implode( ',', $values ) . ')';
+    }
+
+    /**
+     * Cached lookup of the `mighty_backup_sanitize_placeholder_hashes` filter.
+     * Used by build_values_string() which runs per-row and would otherwise pay
+     * apply_filters() overhead millions of times on a big-table export.
+     */
+    private function sanitize_hashes_enabled(): bool {
+        if ( $this->sanitize_hashes_cache === null ) {
+            $this->sanitize_hashes_cache = (bool) apply_filters(
+                'mighty_backup_sanitize_placeholder_hashes',
+                true
+            );
+        }
+        return $this->sanitize_hashes_cache;
     }
 
     /**

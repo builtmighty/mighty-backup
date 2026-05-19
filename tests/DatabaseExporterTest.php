@@ -96,9 +96,9 @@ class DatabaseExporterTest extends TestCase {
 
     public function test_build_values_string_strips_placeholder_escape_hash(): void {
         // wpdb's get_results() returns user data with literal '%' replaced by
-        // the session's `{HASH}` token. build_values_string() must call
-        // remove_placeholder_escape on every string value before writing,
-        // or the dump bakes the hash in permanently.
+        // the session's `{HASH}` token. build_values_string() runs every value
+        // through the regex-based sanitizer in Mighty_Backup_Placeholder_Repair,
+        // so the dump never bakes the hash in permanently.
         $hash = '{' . str_repeat( 'a', 64 ) . '}';
 
         $stub = new class( $hash ) {
@@ -121,6 +121,114 @@ class DatabaseExporterTest extends TestCase {
 
         $this->assertStringNotContainsString( $hash, $result );
         $this->assertStringContainsString( '/%postname%/', $result );
+
+        unset( $GLOBALS['wpdb'] );
+    }
+
+    public function test_build_values_string_strips_persisted_cross_session_hash(): void {
+        // Regression guard for the cross-session leak: in the previous
+        // implementation, build_values_string() called
+        // $wpdb->remove_placeholder_escape() which only str_replaces the
+        // CURRENT session's hash. Persisted tokens minted by prior sessions
+        // (a different hash) fell straight through into the dump. The fix is
+        // to use the regex-based sanitizer, which matches `\{[a-f0-9]{64}\}`
+        // and catches any session's hash.
+        $session_hash   = '{' . str_repeat( 'a', 64 ) . '}';
+        $persisted_hash = '{' . str_repeat( 'b', 64 ) . '}';  // different hash!
+
+        // wpdb stub: remove_placeholder_escape only knows the session hash.
+        // Even though our fix no longer calls this method, we stub it the way
+        // the OLD code expected — proving the new code doesn't depend on it
+        // and that a value containing a foreign hash is still stripped.
+        $stub = new class( $session_hash ) {
+            public function __construct( private string $hash ) {}
+            public function remove_placeholder_escape( string $val ): string {
+                return str_replace( $this->hash, '%', $val );
+            }
+        };
+        $GLOBALS['wpdb'] = $stub;
+
+        Functions\when( 'esc_sql' )->alias( static fn ( $v ) => addslashes( (string) $v ) );
+
+        $exporter = new Mighty_Backup_Database_Exporter();
+        $row      = [
+            'meta_id'    => 1,
+            'meta_value' => "Highly micronised 100{$persisted_hash} pure creatine",
+        ];
+
+        $result = $this->invoke( $exporter, 'build_values_string', [ $row, [] ] );
+
+        // Persisted hash must be gone, replaced by literal '%'.
+        $this->assertStringNotContainsString( $persisted_hash, $result );
+        $this->assertStringContainsString( '100%', $result );
+
+        unset( $GLOBALS['wpdb'] );
+    }
+
+    public function test_build_values_string_increments_placeholder_strips_counter(): void {
+        // Counter must tick for every value that had at least one token
+        // stripped — operators rely on it via the live-log warning.
+        $hash = '{' . str_repeat( 'c', 64 ) . '}';
+
+        $stub = new class( $hash ) {
+            public function __construct( private string $hash ) {}
+            public function remove_placeholder_escape( string $val ): string {
+                return str_replace( $this->hash, '%', $val );
+            }
+        };
+        $GLOBALS['wpdb'] = $stub;
+
+        Functions\when( 'esc_sql' )->alias( static fn ( $v ) => addslashes( (string) $v ) );
+
+        $exporter = new Mighty_Backup_Database_Exporter();
+
+        $counter_ref = new \ReflectionProperty( $exporter, 'placeholder_strips' );
+        $counter_ref->setAccessible( true );
+        $this->assertSame( 0, $counter_ref->getValue( $exporter ) );
+
+        // One row with two values that each contain tokens — counter increments
+        // once per value (not once per token), matching the per-value strip loop.
+        $row = [
+            'a' => "alpha{$hash}beta",
+            'b' => "gamma{$hash}delta{$hash}",
+            'c' => 'clean value with no token',
+        ];
+        $this->invoke( $exporter, 'build_values_string', [ $row, [] ] );
+
+        $this->assertSame( 2, $counter_ref->getValue( $exporter ) );
+
+        unset( $GLOBALS['wpdb'] );
+    }
+
+    public function test_build_values_string_respects_sanitize_hashes_filter(): void {
+        // When the filter returns false, the sanitizer is bypassed entirely
+        // — operators must be able to ship a raw dump for diagnostic reasons.
+        $hash = '{' . str_repeat( 'd', 64 ) . '}';
+
+        $stub = new class( $hash ) {
+            public function __construct( private string $hash ) {}
+            public function remove_placeholder_escape( string $val ): string {
+                return str_replace( $this->hash, '%', $val );
+            }
+        };
+        $GLOBALS['wpdb'] = $stub;
+
+        Functions\when( 'esc_sql' )->alias( static fn ( $v ) => addslashes( (string) $v ) );
+        // Override the default returnArg(2) stub from setUp() with an explicit false.
+        Functions\when( 'apply_filters' )->alias( static function ( string $filter, $default ) {
+            if ( $filter === 'mighty_backup_sanitize_placeholder_hashes' ) {
+                return false;
+            }
+            return $default;
+        } );
+
+        $exporter = new Mighty_Backup_Database_Exporter();
+        $row      = [ 'meta_value' => "x{$hash}y" ];
+
+        $result = $this->invoke( $exporter, 'build_values_string', [ $row, [] ] );
+
+        // Filter off → hash survives.
+        $this->assertStringContainsString( $hash, $result );
 
         unset( $GLOBALS['wpdb'] );
     }
