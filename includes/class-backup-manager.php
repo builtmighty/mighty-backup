@@ -897,12 +897,22 @@ class Mighty_Backup_Manager {
         $total      = count( $state['steps'] );
         $current    = $state['step_index'] + 1;
 
-        // Sub-progress within the chunked DB export phase.
+        // Sub-progress within the chunked DB export phase. The db_export state
+        // has two shapes: the PHP path uses tables/tables_exported, while the
+        // mysqldump-chunked path uses big_tables/big_tables_index and has no
+        // 'tables' key. Branch on method so neither shape fatals on count().
         $sub_progress = null;
         if ( $state['current_step'] === 'export_db' && isset( $state['db_export'] ) ) {
-            $db           = $state['db_export'];
-            $total_tables = count( $db['tables'] );
-            $exported     = $db['tables_exported'];
+            $db = $state['db_export'];
+
+            if ( ( $db['method'] ?? null ) === 'mysqldump_chunked' ) {
+                $total_tables = is_array( $db['big_tables'] ?? null ) ? count( $db['big_tables'] ) : 0;
+                $exported     = (int) ( $db['big_tables_index'] ?? 0 );
+            } else {
+                $total_tables = is_array( $db['tables'] ?? null ) ? count( $db['tables'] ) : 0;
+                $exported     = (int) ( $db['tables_exported'] ?? 0 );
+            }
+
             $step_label   = sprintf( 'Exporting database (%d/%d tables)', $exported, $total_tables );
             $sub_progress = $total_tables > 0 ? round( ( $exported / $total_tables ) * 100 ) : 0;
         }

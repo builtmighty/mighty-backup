@@ -196,6 +196,83 @@ class BackupManagerTest extends TestCase {
         $this->assertSame( 33, $status['progress'] ); // 2/6 = 33%
     }
 
+    public function test_get_status_handles_mysqldump_chunked_db_export_shape(): void {
+        // Regression guard for the 2.13.0 → 2.13.1 hot-fix: the chunked
+        // mysqldump path writes db_export with big_tables / big_tables_index
+        // instead of tables / tables_exported. get_status() must branch on
+        // method or it fatals on count(null) under PHP 8.
+        Functions\when( 'get_site_option' )->justReturn( [
+            'status'       => 'running',
+            'type'         => 'full',
+            'trigger'      => 'manual',
+            'timestamp'    => '2026-01-01-030000',
+            'current_step' => 'export_db',
+            'step_index'   => 1,
+            'steps'        => [ 'start', 'export_db', 'archive_files', 'upload_db', 'upload_files', 'cleanup' ],
+            'db_file_size'    => null,
+            'files_file_size' => null,
+            'error'        => null,
+            'started_at'   => '2026-01-01 03:00:00',
+            'db_export'    => [
+                'method'                   => 'mysqldump_chunked',
+                'raw_path'                 => '/tmp/test.sql',
+                'big_tables'               => [ 'wp_postmeta', 'wp_options' ],
+                'big_tables_index'         => 1,
+                'current_table_pk'         => 'option_id',
+                'current_table_max_pk'     => 100000,
+                'current_table_last_pk'    => 25000,
+                'current_table_range_size' => 50000,
+                'table_sizes'              => [ 'wp_postmeta' => 9_000_000_000, 'wp_options' => 2_000_000_000 ],
+                // Notably: no 'tables' or 'tables_exported' key.
+            ],
+        ] );
+
+        $manager = new Mighty_Backup_Manager();
+        $status  = $manager->get_status();
+
+        $this->assertTrue( $status['active'] );
+        $this->assertSame( 'export_db', $status['current_step'] );
+        $this->assertSame( 'Exporting database (1/2 tables)', $status['step_label'] );
+
+        // Same interpolation math as the PHP-path test: step 2 of 6 sits in
+        // the 17-33 band; halfway through (1/2 big tables) lands at ~25.
+        $this->assertGreaterThan( 17, $status['progress'] );
+        $this->assertLessThan( 33, $status['progress'] );
+    }
+
+    public function test_get_status_does_not_fatal_on_malformed_db_export_state(): void {
+        // Defensive: if db_export is in the chunked shape but big_tables is
+        // somehow missing (older state version, hand-edited option, race),
+        // get_status() must report 0/0 instead of fataling. The ?? null +
+        // is_array() guard is the safety net.
+        Functions\when( 'get_site_option' )->justReturn( [
+            'status'       => 'running',
+            'type'         => 'full',
+            'trigger'      => 'manual',
+            'timestamp'    => '2026-01-01-030000',
+            'current_step' => 'export_db',
+            'step_index'   => 1,
+            'steps'        => [ 'start', 'export_db', 'archive_files', 'upload_db', 'upload_files', 'cleanup' ],
+            'db_file_size'    => null,
+            'files_file_size' => null,
+            'error'        => null,
+            'started_at'   => '2026-01-01 03:00:00',
+            'db_export'    => [
+                'method'   => 'mysqldump_chunked',
+                'raw_path' => '/tmp/test.sql',
+                // big_tables / big_tables_index intentionally missing
+            ],
+        ] );
+
+        $manager = new Mighty_Backup_Manager();
+        $status  = $manager->get_status();
+
+        // Renders 0/0 instead of fataling.
+        $this->assertSame( 'Exporting database (0/0 tables)', $status['step_label'] );
+        // sub_progress is 0 when total_tables is 0; outer progress equals step start.
+        $this->assertSame( 17, $status['progress'] );
+    }
+
     public function test_cancel_cleans_up_raw_sql_file(): void {
         $raw_path = tempnam( sys_get_temp_dir(), 'bm-test-' ) . '.sql';
         file_put_contents( $raw_path, 'test data' );

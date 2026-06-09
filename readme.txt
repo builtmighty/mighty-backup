@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.13.1
+Stable tag: 2.13.2
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,9 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.13.2 =
+* Fixed `count(): Argument #1 ($value) must be of type Countable|array, null given` fatal in `Mighty_Backup_Manager::get_status()` on PHP 8 when polling status during a chunked-mysqldump database export (regression introduced in 2.13.0). The chunked path's `$state['db_export']` shape uses `big_tables` / `big_tables_index` keys, but `get_status()` was still reading the PHP path's `tables` / `tables_exported` keys, fataling on the absent `tables` key. Now branches on `db_export['method']` and guards both shapes with `?? null` + `is_array()` so a malformed state can never re-introduce the fatal. Affected callers: `wp mighty-backup status`, the admin-UI AJAX polling, and the WP-CLI poll loop in `wp mighty-backup run`.
 
 = 2.13.1 =
 * Fixed PHP-path database export leaking persisted wpdb placeholder-escape hashes (cross-session `{HASH}` tokens). `build_values_string()` previously called `$wpdb->remove_placeholder_escape()`, which only matches the *current* request's session hash via `str_replace` — tokens minted by prior WordPress sessions fell through verbatim into the dump. The PHP-path row writer now uses the regex-based `Mighty_Backup_Placeholder_Repair::sanitize_string()` already used by the mysqldump streaming path, which matches `\{[a-f0-9]{64}\}` uniformly and also recomputes `s:N:"…"` length prefixes for serialized payloads (ACF flexible content, etc.). Net effect on poisoned databases: backup files come out clean even when the source DB still has tokens.
