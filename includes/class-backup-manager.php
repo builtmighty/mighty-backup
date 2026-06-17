@@ -200,6 +200,17 @@ class Mighty_Backup_Manager {
             return;
         }
 
+        // State-shape validator: a backup in flight at upgrade time, or a
+        // hand-edited STATE_OPTION, may carry a db_export sub-state in the
+        // wrong shape for the current code (e.g., 2.13.0 chunked-mysqldump
+        // shape vs older PHP-only shape). Fail with a clear message instead
+        // of dereferencing missing keys deep in the run loop. The 029bc0b
+        // hot-fix only patched get_status(); this is the missing twin.
+        if ( isset( $state['db_export'] ) && ! $this->validate_db_export_shape( $state['db_export'] ) ) {
+            $this->fail( $state, 'Database export state is in an unexpected shape (likely a stale backup from a prior plugin version). Cancel and start a fresh backup.' );
+            return;
+        }
+
         $settings              = new Mighty_Backup_Settings();
         $streamlined           = (bool) $settings->get( 'streamlined_mode', false );
         $excluded_tables       = (array) $settings->get( 'excluded_tables', [] );
@@ -1155,12 +1166,54 @@ class Mighty_Backup_Manager {
             foreach ( $claim->get_actions() as $action_id ) {
                 \ActionScheduler_QueueRunner::instance()->process_action( $action_id, 'Mighty Backup' );
             }
-        } catch ( \Exception $e ) {
+        } catch ( \Throwable $e ) {
             // Action-level errors are handled inside each step's try/catch.
-            // This guard is for unexpected exceptions to ensure claim release.
+            // Catching \Throwable (not just \Exception) covers PHP 7+
+            // TypeError/Error subclasses — without this a stray TypeError
+            // would skip release_claim() and wedge the AS claim globally
+            // for every Action Scheduler user on the install. The finally
+            // block guarantees release no matter what.
+            error_log( 'Mighty Backup: process_next_action error — ' . $e->getMessage() );
         } finally {
             $store->release_claim( $claim );
         }
+    }
+
+    /**
+     * Validate that a db_export sub-state matches one of the known shapes.
+     * Returns false if the shape is unrecognized — caller should fail() the
+     * backup rather than dereferencing missing keys at runtime.
+     *
+     * Recognized shapes:
+     *   chunked-mysqldump: {method: 'mysqldump_chunked', raw_path, big_tables, big_tables_index}
+     *   PHP path:          {raw_path, tables, tables_exported}
+     *
+     * Single-shot mysqldump never populates db_export at all (it runs inline
+     * in step_export_db), so its absence is not invalid — the caller checks
+     * isset() before calling here.
+     */
+    private function validate_db_export_shape( $db ): bool {
+        if ( ! is_array( $db ) ) {
+            return false;
+        }
+        $is_chunked = ( $db['method'] ?? null ) === 'mysqldump_chunked';
+        if ( $is_chunked ) {
+            $required = [ 'raw_path', 'big_tables', 'big_tables_index' ];
+            foreach ( $required as $key ) {
+                if ( ! array_key_exists( $key, $db ) ) {
+                    return false;
+                }
+            }
+            return is_array( $db['big_tables'] );
+        }
+        // PHP path.
+        $required = [ 'raw_path', 'tables', 'tables_exported' ];
+        foreach ( $required as $key ) {
+            if ( ! array_key_exists( $key, $db ) ) {
+                return false;
+            }
+        }
+        return is_array( $db['tables'] );
     }
 
     /**

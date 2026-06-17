@@ -273,6 +273,57 @@ class BackupManagerTest extends TestCase {
         $this->assertFalse( $manager->is_running() );
     }
 
+    public function test_validate_db_export_shape_accepts_known_shapes(): void {
+        $manager = new Mighty_Backup_Manager();
+        $ref     = new \ReflectionMethod( $manager, 'validate_db_export_shape' );
+        $ref->setAccessible( true );
+
+        // Chunked-mysqldump shape — minimal required keys.
+        $this->assertTrue( $ref->invokeArgs( $manager, [ [
+            'method'           => 'mysqldump_chunked',
+            'raw_path'         => '/tmp/x.sql',
+            'big_tables'       => [ 'wp_postmeta' ],
+            'big_tables_index' => 0,
+        ] ] ) );
+
+        // PHP path shape — minimal required keys.
+        $this->assertTrue( $ref->invokeArgs( $manager, [ [
+            'raw_path'        => '/tmp/x.sql',
+            'tables'          => [ 'wp_options', 'wp_posts' ],
+            'tables_exported' => 1,
+        ] ] ) );
+    }
+
+    public function test_validate_db_export_shape_rejects_unknown_shapes(): void {
+        $manager = new Mighty_Backup_Manager();
+        $ref     = new \ReflectionMethod( $manager, 'validate_db_export_shape' );
+        $ref->setAccessible( true );
+
+        // Chunked-mysqldump shape missing required key.
+        $this->assertFalse( $ref->invokeArgs( $manager, [ [
+            'method'   => 'mysqldump_chunked',
+            'raw_path' => '/tmp/x.sql',
+            // big_tables / big_tables_index missing
+        ] ] ) );
+
+        // PHP path shape missing tables_exported.
+        $this->assertFalse( $ref->invokeArgs( $manager, [ [
+            'raw_path' => '/tmp/x.sql',
+            'tables'   => [ 'wp_options' ],
+        ] ] ) );
+
+        // Not an array at all.
+        $this->assertFalse( $ref->invokeArgs( $manager, [ 'not an array' ] ) );
+
+        // big_tables not an array.
+        $this->assertFalse( $ref->invokeArgs( $manager, [ [
+            'method'           => 'mysqldump_chunked',
+            'raw_path'         => '/tmp/x.sql',
+            'big_tables'       => 'wp_postmeta',  // wrong type
+            'big_tables_index' => 0,
+        ] ] ) );
+    }
+
     public function test_fail_skips_re_save_when_cancel_tombstone_is_set(): void {
         // The race: cancel() writes status='cancelling' and starts cleanup;
         // an in-flight step's catch -> fail() reads the tombstoned state and
