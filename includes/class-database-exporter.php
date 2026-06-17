@@ -137,6 +137,164 @@ class Mighty_Backup_Database_Exporter {
     }
 
     /**
+     * Discover a usable monotonic cursor column for chunked range scans.
+     * Tries (in order):
+     *   1. The single-column PRIMARY KEY
+     *   2. A single-column UNIQUE NOT NULL index
+     *   3. A column declared with auto_increment
+     *
+     * Returns null when nothing usable exists — caller falls back to a single
+     * mysqldump invocation (chunked path) or LIMIT/OFFSET inside a snapshot
+     * transaction (PHP path). Covers ~90% of real "no PRIMARY KEY" tables in
+     * the wild because the author usually has an auto_increment id or a
+     * UNIQUE NOT NULL column — they just forgot the PRIMARY KEY declaration.
+     *
+     * @return array{column: string, numeric: bool, source: string}|null
+     *         source ∈ {'pk', 'unique', 'autoinc'} for diagnostic logging.
+     */
+    public function get_table_cursor_column( string $table ): ?array {
+        // 1. Single-column PRIMARY KEY.
+        $pk = $this->get_primary_key( $table );
+        if ( $pk !== null ) {
+            return [
+                'column'  => $pk,
+                'numeric' => $this->column_is_numeric( $table, $pk ),
+                'source'  => 'pk',
+            ];
+        }
+
+        global $wpdb;
+
+        // 2. Single-column UNIQUE NOT NULL index. SHOW INDEXES exposes `Null`
+        // as 'YES' for nullable and '' for NOT NULL. Group results by Key_name
+        // and accept the first non-PRIMARY index that's one NOT NULL column.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $rows = $wpdb->get_results(
+            "SHOW INDEXES FROM `{$table}` WHERE Non_unique = 0",
+            ARRAY_A
+        );
+        if ( is_array( $rows ) && ! empty( $rows ) ) {
+            $by_name = [];
+            foreach ( $rows as $r ) {
+                $by_name[ $r['Key_name'] ][] = $r;
+            }
+            foreach ( $by_name as $name => $cols ) {
+                if ( $name === 'PRIMARY' ) {
+                    continue;
+                }
+                if ( count( $cols ) !== 1 ) {
+                    continue; // Composite index — first-column cursor isn't a true cursor.
+                }
+                if ( ( $cols[0]['Null'] ?? '' ) !== '' ) {
+                    continue; // NULL allowed — MariaDB lets UNIQUE indexes have duplicate NULLs.
+                }
+                $col = $cols[0]['Column_name'];
+                return [
+                    'column'  => $col,
+                    'numeric' => $this->column_is_numeric( $table, $col ),
+                    'source'  => 'unique',
+                ];
+            }
+        }
+
+        // 3. auto_increment column (implicit uniqueness; usually paired with
+        // PRIMARY KEY or UNIQUE, but in malformed schemas may stand alone).
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $cols = $wpdb->get_results(
+            "SHOW COLUMNS FROM `{$table}`",
+            ARRAY_A
+        );
+        if ( is_array( $cols ) ) {
+            foreach ( $cols as $c ) {
+                if ( isset( $c['Extra'] ) && stripos( $c['Extra'], 'auto_increment' ) !== false ) {
+                    return [
+                        'column'  => $c['Field'],
+                        'numeric' => true,
+                        'source'  => 'autoinc',
+                    ];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Best-effort check whether a column has a numeric SQL type. Used to choose
+     * arithmetic range arithmetic vs LIMIT-N seek for non-numeric cursors.
+     */
+    private function column_is_numeric( string $table, string $column ): bool {
+        global $wpdb;
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+                "SHOW COLUMNS FROM `{$table}` WHERE Field = %s",
+                $column
+            ),
+            ARRAY_A
+        );
+        if ( ! $row || empty( $row['Type'] ) ) {
+            return false;
+        }
+        // Matches int/tinyint/smallint/mediumint/bigint, decimal, float,
+        // double, numeric, bit. Bools (tinyint(1)) match int.
+        return (bool) preg_match(
+            '/^(tiny|small|medium|big)?int|^decimal|^float|^double|^numeric|^bit/i',
+            $row['Type']
+        );
+    }
+
+    /**
+     * For a non-numeric cursor, find the value to use as the upper bound of
+     * the next range scan: the (range_size)-th value strictly greater than
+     * $start_after_cursor, ordered ascending. Falls back to $max_cursor when
+     * fewer than $range_size rows remain. One indexed LIMIT lookup per range
+     * — acceptable cost; the cursor column is required to be UNIQUE-indexed.
+     *
+     * Numeric cursors do this arithmetically (last_pk + range_size) and don't
+     * need this method.
+     */
+    public function next_cursor_upper_bound(
+        string $table,
+        string $cursor_column,
+        $start_after_cursor,
+        int $range_size,
+        $max_cursor
+    ): string {
+        global $wpdb;
+        $offset = max( 0, $range_size - 1 );
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $value  = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT `{$cursor_column}` FROM `{$table}` "
+                . "WHERE `{$cursor_column}` > %s "
+                . "ORDER BY `{$cursor_column}` ASC LIMIT %d, 1",
+                $start_after_cursor,
+                $offset
+            )
+        );
+        return $value === null ? (string) $max_cursor : (string) $value;
+    }
+
+    /**
+     * Best-effort engine check for snapshot-eligibility of LIMIT/OFFSET reads.
+     * InnoDB honors REPEATABLE READ + CONSISTENT SNAPSHOT; MyISAM ignores
+     * transactions entirely.
+     */
+    private function table_is_innodb( string $table ): bool {
+        global $wpdb;
+        $engine = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT ENGINE FROM information_schema.TABLES "
+                . "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+                DB_NAME,
+                $table
+            )
+        );
+        return is_string( $engine ) && strcasecmp( $engine, 'InnoDB' ) === 0;
+    }
+
+    /**
      * Invoke mysqldump for every table except those in $ignore_tables, appending
      * the dump to $raw_path. Used by the chunked mysqldump path to clear all
      * small tables in a single invocation, leaving big tables for ranged dumps.
@@ -285,6 +443,66 @@ class Mighty_Backup_Database_Exporter {
             return [ 'elapsed' => microtime( true ) - $started ];
         } finally {
             @unlink( $defaults );
+        }
+    }
+
+    /**
+     * Dump a single table's entire data in one mysqldump invocation, no
+     * --where range. Used by the chunked-mysqldump path when a big table has
+     * no usable monotonic cursor (no PK, no UNIQUE NOT NULL, no auto_increment).
+     * The schema must already be in $raw_path from the upfront
+     * dump_table_schema_only_via_mysqldump pass.
+     *
+     * Sets PHP's max_execution_time to 0 for the exec() call so a multi-minute
+     * dump doesn't get truncated by host php.ini caps. Server-level caps
+     * (MySQL wait_timeout, FPM request_terminate_timeout) are outside this
+     * code path — the operator may need to tune them on big-table installs.
+     *
+     * @return array{elapsed: float, bytes: int}
+     */
+    public function dump_table_full_via_mysqldump( string $raw_path, string $table ): array {
+        $bin      = $this->get_dump_binary();
+        $defaults = $this->write_mysql_defaults();
+        $err_path = $raw_path . '.err';
+        $before   = file_exists( $raw_path ) ? (int) filesize( $raw_path ) : 0;
+        $started  = microtime( true );
+
+        $prior_limit = ini_get( 'max_execution_time' );
+        @set_time_limit( 0 );
+
+        try {
+            $command = sprintf(
+                '%s --defaults-extra-file=%s --no-create-info --skip-add-drop-table --single-transaction '
+                . '--quick --skip-lock-tables --set-charset --default-character-set=utf8mb4 --no-tablespaces '
+                . '%s %s >> %s 2>%s',
+                escapeshellcmd( $bin ),
+                escapeshellarg( $defaults ),
+                escapeshellarg( DB_NAME ),
+                escapeshellarg( $table ),
+                escapeshellarg( $raw_path ),
+                escapeshellarg( $err_path )
+            );
+
+            exec( $command, $output, $return_code );
+
+            $stderr = file_exists( $err_path ) ? (string) file_get_contents( $err_path ) : '';
+            @unlink( $err_path );
+            $stderr = $this->filter_dump_stderr( $stderr );
+
+            if ( $return_code !== 0 ) {
+                throw new \Exception( "{$bin} (full-table dump of {$table}) failed (exit {$return_code}): {$stderr}" );
+            }
+
+            $after = file_exists( $raw_path ) ? (int) filesize( $raw_path ) : $before;
+            return [
+                'elapsed' => microtime( true ) - $started,
+                'bytes'   => max( 0, $after - $before ),
+            ];
+        } finally {
+            @unlink( $defaults );
+            if ( $prior_limit !== false && $prior_limit !== '' ) {
+                @set_time_limit( (int) $prior_limit );
+            }
         }
     }
 
@@ -1858,7 +2076,25 @@ class Mighty_Backup_Database_Exporter {
         global $wpdb;
 
         $resuming  = $resume !== null && isset( $resume['pk_column'], $resume['last_pk'] );
-        $pk_column = $resuming ? $resume['pk_column'] : $this->get_primary_key( $table );
+
+        if ( $resuming ) {
+            $pk_column = $resume['pk_column'];
+        } else {
+            // Cursor detection: PRIMARY KEY → UNIQUE NOT NULL → auto_increment.
+            // Catches the common "forgot to declare PRIMARY KEY" case so
+            // tables with a usable monotonic column resume safely across
+            // chunks instead of falling back to LIMIT/OFFSET.
+            $cursor    = $this->get_table_cursor_column( $table );
+            $pk_column = $cursor['column'] ?? null;
+            if ( $pk_column !== null && $cursor['source'] !== 'pk' && class_exists( 'Mighty_Backup_Log_Stream' ) ) {
+                Mighty_Backup_Log_Stream::add( sprintf(
+                    'Table %s: no PRIMARY KEY — using %s (%s) as virtual cursor',
+                    $table,
+                    $cursor['source'],
+                    $pk_column
+                ) );
+            }
+        }
 
         if ( ! $resuming ) {
             $this->write( $gz, "--\n-- Table: `{$table}`\n--\n\n" );
@@ -1889,12 +2125,15 @@ class Mighty_Backup_Database_Exporter {
                 ];
             }
         } else {
-            // No single-column PK — run to completion in this chunk. The
-            // chunk-time budget is ignored here; LIMIT/OFFSET pagination can't
-            // safely resume under concurrent writes.
+            // No usable cursor anywhere — fall back to LIMIT/OFFSET. The
+            // chunk-time budget is ignored because OFFSET pagination can't
+            // resume mid-table without snapshot continuity across chunks;
+            // export_table_data_offset wraps the loop in REPEATABLE READ +
+            // CONSISTENT SNAPSHOT on InnoDB so concurrent writes don't shift
+            // rows across pages.
             if ( $chunk_seconds > 0 && class_exists( 'Mighty_Backup_Log_Stream' ) ) {
                 Mighty_Backup_Log_Stream::add(
-                    "Table {$table}: no primary key — exporting single-shot (cannot resume mid-table)"
+                    "Table {$table}: no usable cursor — single-shot LIMIT/OFFSET in REPEATABLE READ snapshot (this chunk may run longer)"
                 );
             }
             $this->export_table_data_offset( $gz, $table );
@@ -2001,45 +2240,66 @@ class Mighty_Backup_Database_Exporter {
     }
 
     /**
-     * Export table data using LIMIT/OFFSET (fallback for tables without a PK).
+     * Export table data using LIMIT/OFFSET. Used as the last-resort fallback
+     * for tables with no usable monotonic cursor (no PK, no UNIQUE NOT NULL,
+     * no auto_increment).
+     *
+     * On InnoDB tables, wraps the entire pagination loop in REPEATABLE READ +
+     * START TRANSACTION WITH CONSISTENT SNAPSHOT so concurrent INSERTs and
+     * DELETEs don't shift rows across pages (the classic LIMIT/OFFSET
+     * skip-or-duplicate hazard). MyISAM ignores transactions; we run without
+     * the snapshot there — risk surfaces only on cursorless MyISAM big tables,
+     * which is a rare combination and outside what this code can fix.
      */
     private function export_table_data_offset( $gz, string $table ): void {
         global $wpdb;
 
-        $binary_cols   = $this->get_binary_columns( $table );
-        $offset        = 0;
-        $batch_size    = 500;
-        $insert_buffer = [];
-
-        while ( true ) {
-            $rows = $wpdb->get_results(
-                $wpdb->prepare(
-                    "SELECT * FROM `{$table}` LIMIT %d OFFSET %d",
-                    $batch_size,
-                    $offset
-                ),
-                ARRAY_A
-            );
-
-            if ( empty( $rows ) ) {
-                break;
-            }
-
-            foreach ( $rows as $row ) {
-                $insert_buffer[] = $this->build_values_string( $row, $binary_cols );
-
-                if ( count( $insert_buffer ) >= $this->insert_batch ) {
-                    $this->flush_inserts( $gz, $table, $insert_buffer );
-                    $insert_buffer = [];
-                }
-            }
-
-            $offset += $batch_size;
-            unset( $rows );
+        $is_innodb = $this->table_is_innodb( $table );
+        if ( $is_innodb ) {
+            $wpdb->query( 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ' );
+            $wpdb->query( 'START TRANSACTION WITH CONSISTENT SNAPSHOT' );
         }
 
-        if ( ! empty( $insert_buffer ) ) {
-            $this->flush_inserts( $gz, $table, $insert_buffer );
+        try {
+            $binary_cols   = $this->get_binary_columns( $table );
+            $offset        = 0;
+            $batch_size    = 500;
+            $insert_buffer = [];
+
+            while ( true ) {
+                $rows = $wpdb->get_results(
+                    $wpdb->prepare(
+                        "SELECT * FROM `{$table}` LIMIT %d OFFSET %d",
+                        $batch_size,
+                        $offset
+                    ),
+                    ARRAY_A
+                );
+
+                if ( empty( $rows ) ) {
+                    break;
+                }
+
+                foreach ( $rows as $row ) {
+                    $insert_buffer[] = $this->build_values_string( $row, $binary_cols );
+
+                    if ( count( $insert_buffer ) >= $this->insert_batch ) {
+                        $this->flush_inserts( $gz, $table, $insert_buffer );
+                        $insert_buffer = [];
+                    }
+                }
+
+                $offset += $batch_size;
+                unset( $rows );
+            }
+
+            if ( ! empty( $insert_buffer ) ) {
+                $this->flush_inserts( $gz, $table, $insert_buffer );
+            }
+        } finally {
+            if ( $is_innodb ) {
+                $wpdb->query( 'COMMIT' );
+            }
         }
     }
 

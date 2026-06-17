@@ -263,7 +263,10 @@ class Mighty_Backup_Manager {
                             'raw_path'                  => $raw_path,
                             'big_tables'                => $big_list,
                             'big_tables_index'          => $first_table_state['index'],
+                            'current_table_mode'        => $first_table_state['mode'],
                             'current_table_pk'          => $first_table_state['pk'],
+                            'current_table_numeric'     => $first_table_state['numeric'],
+                            'current_table_source'      => $first_table_state['source'],
                             'current_table_max_pk'      => $first_table_state['max_pk'],
                             'current_table_last_pk'     => $first_table_state['last_pk'],
                             'current_table_range_size'  => $first_table_state['range_size'],
@@ -407,15 +410,33 @@ class Mighty_Backup_Manager {
     }
 
     /**
-     * Initialize chunked-mysqldump state for one big table — picking up the
-     * next table whose PK is range-friendly. Tables without a single-column
-     * numeric PK can't be range-chunked safely; for those the schema is
-     * already in the raw dump (from dump_table_schema_only_via_mysqldump) and
-     * we issue ONE full mysqldump-with-data inline here, advancing the index
-     * past them. The returned struct describes the table the next chunk will
-     * range-dump (or signals "all done" via index >= count).
+     * Resolve the next big-table cursor for the chunked-mysqldump path.
      *
-     * @return array{index:int, pk:?string, max_pk:mixed, last_pk:mixed, range_size:int}
+     * Implements the no-PK Hybrid B→D graceful-degradation chain:
+     *   B (range)            — table has a usable monotonic cursor (PRIMARY KEY,
+     *                          UNIQUE NOT NULL, or auto_increment). Numeric or
+     *                          string cursors both feed the existing range
+     *                          pipeline at run_mysqldump_chunked_step().
+     *   D (singleshot_full)  — no usable cursor exists. Issue ONE full
+     *                          mysqldump-with-data invocation for the table
+     *                          in its own Action Scheduler chunk with
+     *                          set_time_limit(0). Schema is already in the
+     *                          raw file from the upfront pass.
+     *
+     * Empty tables and tables that produce no cursor candidates are skipped
+     * after their schema-only dump; the for-loop advances past them so the
+     * caller doesn't need to filter again.
+     *
+     * @return array{
+     *   index: int,
+     *   mode: 'range'|'singleshot_full'|'done',
+     *   pk: ?string,
+     *   numeric: bool,
+     *   source: ?string,
+     *   max_pk: mixed,
+     *   last_pk: mixed,
+     *   range_size: int,
+     * }
      */
     private function init_big_table_state(
         Mighty_Backup_Database_Exporter $exporter,
@@ -425,68 +446,87 @@ class Mighty_Backup_Manager {
     ): array {
         $count = count( $big_list );
         for ( $i = $start_index; $i < $count; $i++ ) {
-            $table     = $big_list[ $i ];
-            $pk_column = $exporter->get_table_primary_key( $table );
+            $table  = $big_list[ $i ];
+            $cursor = $exporter->get_table_cursor_column( $table );
 
-            if ( $pk_column === null ) {
-                // Big table without a single-column primary key: range chunking
-                // is unsafe (no monotonic key to bound `--where` against), and
-                // a single mysqldump-with-data would likely blow chunk_seconds.
-                // The schema is already in the raw file from the upfront pass;
-                // data is skipped, and the error-translator surfaces remediation
-                // ("add a PK or mark structure-only in Settings").
+            if ( $cursor === null ) {
+                // No PK, no UNIQUE NOT NULL, no auto_increment. Falls through to
+                // the singleshot full dump (D in the no-PK plan). The dump
+                // runs unbounded; set_time_limit(0) is applied inside
+                // dump_table_full_via_mysqldump.
                 Mighty_Backup_Log_Stream::add(
-                    "Table {$table} has no primary key — cannot resume mid-table. Data skipped; mark structure-only in Settings → Schedule → Database Tables to silence this warning."
+                    "Table {$table}: no usable cursor — single-shot mysqldump (this chunk may run longer)"
                 );
-                continue;
+                return [
+                    'index'      => $i,
+                    'mode'       => 'singleshot_full',
+                    'pk'         => null,
+                    'numeric'    => false,
+                    'source'     => null,
+                    'max_pk'     => null,
+                    'last_pk'    => null,
+                    'range_size' => 0,
+                ];
             }
 
-            $bounds = $exporter->get_pk_bounds( $table, $pk_column );
-
+            $bounds = $exporter->get_pk_bounds( $table, $cursor['column'] );
             if ( $bounds['max'] === null ) {
-                // Empty table — nothing to dump beyond schema, move on.
+                // Empty table — schema already dumped; nothing to do here.
                 continue;
             }
 
-            if ( ! is_numeric( $bounds['max'] ) ) {
-                // Non-numeric PK (UUID, hash, etc.) — can't safely compute a
-                // numeric range. Warn and skip data dump.
-                Mighty_Backup_Log_Stream::add(
-                    "Table {$table} has a non-numeric primary key ({$pk_column}) — range chunking not supported; skipping data."
-                );
-                continue;
+            if ( $cursor['numeric'] ) {
+                $rows_estimate = max( 1, (int) $bounds['max'] - (int) ( $bounds['min'] ?? 0 ) + 1 );
+                $initial_range = (int) max( 100000, min( 1000000, $rows_estimate / 20 ) );
+                // Start at min-1 so the first --where `cursor > last` includes the min row.
+                $start_after   = (int) ( $bounds['min'] ?? 0 ) - 1;
+                $source_label  = $cursor['source'] === 'pk' ? 'PK' : strtoupper( $cursor['source'] );
+                Mighty_Backup_Log_Stream::add( sprintf(
+                    'Big table %s: ranged mysqldump via %s (%s), %s..%s (initial range %d rows)',
+                    $table,
+                    $source_label,
+                    $cursor['column'],
+                    (string) ( $bounds['min'] ?? 0 ),
+                    (string) $bounds['max'],
+                    $initial_range
+                ) );
+            } else {
+                // Non-numeric cursor (VARCHAR, UUID, hash). Use a fixed initial
+                // range row-count; the run loop computes the upper bound via a
+                // separate indexed LIMIT seek for each range.
+                $initial_range = 50000;
+                $start_after   = null; // sentinel: "before min" for string comparisons
+                $source_label  = $cursor['source'] === 'pk' ? 'PK' : strtoupper( $cursor['source'] );
+                Mighty_Backup_Log_Stream::add( sprintf(
+                    'Big table %s: ranged mysqldump via %s (%s, string cursor), %s..%s (initial range %d rows)',
+                    $table,
+                    $source_label,
+                    $cursor['column'],
+                    (string) ( $bounds['min'] ?? '' ),
+                    (string) $bounds['max'],
+                    $initial_range
+                ) );
             }
-
-            $rows_estimate = max( 1, (int) $bounds['max'] - (int) ( $bounds['min'] ?? 0 ) + 1 );
-            $initial_range = (int) max( 100000, min( 1000000, $rows_estimate / 20 ) );
-
-            Mighty_Backup_Log_Stream::add( sprintf(
-                'Big table %s: ranged mysqldump from %s=%s to %s=%s (initial range %d rows)',
-                $table,
-                $pk_column,
-                (string) ( $bounds['min'] ?? 0 ),
-                $pk_column,
-                (string) $bounds['max'],
-                $initial_range
-            ) );
-
-            // `last_pk` is the "highest PK already dumped" cursor; start at
-            // min-1 so the first --where `pk > last_pk` includes row $min.
-            $start_after = (int) ( $bounds['min'] ?? 0 ) - 1;
 
             return [
                 'index'      => $i,
-                'pk'         => $pk_column,
+                'mode'       => 'range',
+                'pk'         => $cursor['column'],
+                'numeric'    => $cursor['numeric'],
+                'source'     => $cursor['source'],
                 'max_pk'     => $bounds['max'],
                 'last_pk'    => $start_after,
                 'range_size' => $initial_range,
             ];
         }
 
-        // No more range-able big tables — caller should finalize.
+        // No more big tables — caller should finalize.
         return [
             'index'      => $count,
+            'mode'       => 'done',
             'pk'         => null,
+            'numeric'    => false,
+            'source'     => null,
             'max_pk'     => null,
             'last_pk'    => null,
             'range_size' => 0,
@@ -494,9 +534,15 @@ class Mighty_Backup_Manager {
     }
 
     /**
-     * Execute one chunk's worth of big-table range dumps. Loops until the
-     * chunk budget is exhausted or every big table is fully dumped, then
-     * either reschedules or finalizes the export (gzip raw → output).
+     * Execute one chunk's worth of big-table dumps. Dispatches on each table's
+     * mode (set by init_big_table_state):
+     *   'range'            — loop --where ranges adaptively against chunk_seconds
+     *   'singleshot_full'  — one mysqldump-with-data invocation, consuming one
+     *                        Action Scheduler chunk regardless of budget
+     *   'done'             — caller finalizes
+     *
+     * Numeric cursors compute the next upper bound arithmetically; string
+     * cursors do an indexed LIMIT seek via next_cursor_upper_bound().
      */
     private function run_mysqldump_chunked_step(
         array $state,
@@ -518,27 +564,64 @@ class Mighty_Backup_Manager {
                 break;
             }
 
-            $table     = $big_list[ $db['big_tables_index'] ];
+            $table = $big_list[ $db['big_tables_index'] ];
+            $mode  = $db['current_table_mode'] ?? 'range';
+
+            if ( $mode === 'singleshot_full' ) {
+                // No usable cursor — run one full mysqldump for this table.
+                // Consumes this whole AS chunk; advances index unconditionally
+                // afterwards (success or throw — fail() bubbles via the outer
+                // catch in step_export_db).
+                $info = $exporter->dump_table_full_via_mysqldump( $raw_path, $table );
+                Mighty_Backup_Log_Stream::add( sprintf(
+                    '%s: full-table dump complete in %.1fs (+%s)',
+                    $table,
+                    (float) $info['elapsed'],
+                    size_format( (int) $info['bytes'] )
+                ) );
+                $next = $this->init_big_table_state(
+                    $exporter, $raw_path, $big_list, $db['big_tables_index'] + 1
+                );
+                $db = $this->merge_big_table_state( $db, $next );
+                continue;
+            }
+
+            // mode === 'range'
             $pk        = $db['current_table_pk'];
+            $numeric   = (bool) ( $db['current_table_numeric'] ?? true );
             $max_pk    = $db['current_table_max_pk'];
             $last_pk   = $db['current_table_last_pk'];
             $range     = (int) $db['current_table_range_size'];
 
             if ( $pk === null || $max_pk === null ) {
                 // Defensive: shouldn't happen because init_big_table_state
-                // skips non-rangeable tables. If we hit it, advance.
+                // either returns a range table or a singleshot_full mode.
                 $next = $this->init_big_table_state( $exporter, $raw_path, $big_list, $db['big_tables_index'] + 1 );
                 $db = $this->merge_big_table_state( $db, $next );
                 continue;
             }
 
-            $end_pk = (int) $last_pk + $range;
-            if ( $end_pk > (int) $max_pk ) {
-                $end_pk = (int) $max_pk;
+            if ( $numeric ) {
+                $end_pk = (int) $last_pk + $range;
+                if ( $end_pk > (int) $max_pk ) {
+                    $end_pk = (int) $max_pk;
+                }
+                $range_from = (string) ( (int) $last_pk + 1 );
+                $range_to   = (string) $end_pk;
+            } else {
+                // String cursor: ask the DB for the (range_size)-th value
+                // greater than last_pk. last_pk === null on the very first
+                // range scan; the seek treats that as "before the table's min"
+                // by passing the empty string as the lower bound (lexicographic
+                // strings are >= '').
+                $start_after = $last_pk === null ? '' : (string) $last_pk;
+                $end_pk      = $exporter->next_cursor_upper_bound( $table, $pk, $start_after, $range, $max_pk );
+                $range_from  = $start_after === '' ? '(min)' : (string) $start_after;
+                $range_to    = (string) $end_pk;
             }
 
             $info = $exporter->dump_table_range_via_mysqldump(
-                $raw_path, $table, $pk, $last_pk, $end_pk
+                $raw_path, $table, $pk, $last_pk === null ? '' : $last_pk, $end_pk
             );
 
             // Adapt the next range so it lands at ~70% of chunk_seconds.
@@ -552,13 +635,14 @@ class Mighty_Backup_Manager {
             Mighty_Backup_Log_Stream::add( sprintf(
                 '%s: dumped %s..%s in %.1fs (next range ~%d rows)',
                 $table,
-                (string) ( (int) $last_pk + 1 ),
-                (string) $end_pk,
+                $range_from,
+                $range_to,
                 $elapsed,
                 $range
             ) );
 
-            if ( $end_pk >= (int) $max_pk ) {
+            $done = $numeric ? ( $end_pk >= (int) $max_pk ) : ( (string) $end_pk === (string) $max_pk );
+            if ( $done ) {
                 // Table done — advance to next big table.
                 $next = $this->init_big_table_state(
                     $exporter, $raw_path, $big_list, $db['big_tables_index'] + 1
@@ -571,7 +655,7 @@ class Mighty_Backup_Manager {
         $this->save_state( $state );
 
         if ( $db['big_tables_index'] < $total ) {
-            // More ranges remain.
+            // More work remains.
             Mighty_Backup_Log_Stream::flush();
             as_schedule_single_action( time(), 'mighty_backup_step_export_db', [], self::ACTION_GROUP );
             return;
@@ -597,7 +681,10 @@ class Mighty_Backup_Manager {
      */
     private function merge_big_table_state( array $db, array $next ): array {
         $db['big_tables_index']         = $next['index'];
+        $db['current_table_mode']       = $next['mode'];
         $db['current_table_pk']         = $next['pk'];
+        $db['current_table_numeric']    = $next['numeric'];
+        $db['current_table_source']     = $next['source'];
         $db['current_table_max_pk']     = $next['max_pk'];
         $db['current_table_last_pk']    = $next['last_pk'];
         $db['current_table_range_size'] = $next['range_size'];
