@@ -80,6 +80,9 @@ class Mighty_Backup_Manager {
             throw new \Exception( 'Plugin not configured. Please save your DO Spaces credentials.' );
         }
 
+        // Friendly early-out for the common case (operator clicks "Run Now"
+        // while a backup is already running). The atomic claim below is the
+        // race-safe gate; this check just produces a clearer error message.
         if ( $this->is_running() ) {
             throw new \Exception( 'A backup is already in progress.' );
         }
@@ -111,11 +114,23 @@ class Mighty_Backup_Manager {
             'started_at'       => current_time( 'mysql', true ),
         ];
 
-        // Clear any leftover state from a previous backup so the first poll
-        // doesn't pick up stale completed/failed status.
-        delete_site_option( self::STATE_OPTION );
-
-        $this->save_state( $state );
+        // Atomic claim via add_site_option as a CAS primitive. add_site_option
+        // returns false if the key already exists, giving us a single-winner
+        // race even if wp-cron, admin "Run Now", and `wp mighty-backup run`
+        // all reach this point simultaneously.
+        if ( ! add_site_option( self::STATE_OPTION, $state ) ) {
+            // The option exists. If it's stale (completed/failed), wipe it
+            // and retry the claim. If a racing process beat us to a fresh
+            // claim, the retry will lose and we throw.
+            $current = $this->get_state();
+            if ( is_array( $current ) && in_array( $current['status'] ?? '', [ 'pending', 'running', 'cancelling' ], true ) ) {
+                throw new \Exception( 'A backup just started in another request — please retry.' );
+            }
+            delete_site_option( self::STATE_OPTION );
+            if ( ! add_site_option( self::STATE_OPTION, $state ) ) {
+                throw new \Exception( 'A backup just started in another request — please retry.' );
+            }
+        }
 
         // Schedule the first step to run immediately.
         as_schedule_single_action( time(), 'mighty_backup_step_start', [], self::ACTION_GROUP );
@@ -133,6 +148,14 @@ class Mighty_Backup_Manager {
         }
 
         $this->set_time_limit();
+
+        // Idempotency: AS can re-fire a step after a worker SIGKILL/OOM
+        // between action completion and claim release. If log_id is already
+        // set, this step has already run successfully — just advance.
+        if ( ! empty( $state['log_id'] ) ) {
+            $this->advance( $state );
+            return;
+        }
 
         do_action( 'mighty_backup_before_start', $state );
 
@@ -166,6 +189,16 @@ class Mighty_Backup_Manager {
 
         $this->set_time_limit();
         $this->update_current_step( $state, 'export_db' );
+
+        // Idempotency: if the export already produced a .sql.gz and the
+        // chunked sub-state is gone, this is an AS re-fire after a worker
+        // death between save and dispatch. Advance without redumping.
+        // (Chunked paths keep db_export populated until finalization, so
+        // mid-progress re-fires correctly resume via the existing logic.)
+        if ( ! empty( $state['db_file_size'] ) && ! isset( $state['db_export'] ) ) {
+            $this->advance( $state );
+            return;
+        }
 
         $settings              = new Mighty_Backup_Settings();
         $streamlined           = (bool) $settings->get( 'streamlined_mode', false );
@@ -703,6 +736,14 @@ class Mighty_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'archive_files' );
 
+        // Idempotency: AS re-fire after the archive completed but before
+        // advance() ran. Skip the multi-GB tar rebuild.
+        if ( ! empty( $state['files_file_size'] ) && file_exists( $state['files_local_path'] ) ) {
+            Mighty_Backup_Log_Stream::add( 'File archive already present, skipping rebuild' );
+            $this->advance( $state );
+            return;
+        }
+
         do_action( 'mighty_backup_before_archive_files', $state );
 
         try {
@@ -737,6 +778,14 @@ class Mighty_Backup_Manager {
 
         $this->set_time_limit();
         $this->update_current_step( $state, 'upload_db' );
+
+        // Idempotency: AS re-fire after the upload completed but before
+        // advance() ran. Skip the duplicate multi-GB Spaces re-PUT.
+        if ( ! empty( $state['db_remote_key'] ) ) {
+            Mighty_Backup_Log_Stream::add( 'Database already uploaded, skipping' );
+            $this->advance( $state );
+            return;
+        }
 
         do_action( 'mighty_backup_before_upload', $state, 'db' );
 
@@ -778,6 +827,14 @@ class Mighty_Backup_Manager {
         $this->set_time_limit();
         $this->update_current_step( $state, 'upload_files' );
 
+        // Idempotency: AS re-fire after the upload completed but before
+        // advance() ran. Skip the duplicate multi-GB Spaces re-PUT.
+        if ( ! empty( $state['files_remote_key'] ) ) {
+            Mighty_Backup_Log_Stream::add( 'Files archive already uploaded, skipping' );
+            $this->advance( $state );
+            return;
+        }
+
         do_action( 'mighty_backup_before_upload', $state, 'files' );
 
         try {
@@ -817,6 +874,14 @@ class Mighty_Backup_Manager {
 
         $this->set_time_limit();
         $this->update_current_step( $state, 'cleanup' );
+
+        // Idempotency: AS re-fire after the previous cleanup already marked
+        // the run completed. Bail without re-pruning + re-firing the
+        // mighty_backup_completed hook (which listeners may treat as a new
+        // success).
+        if ( ( $state['status'] ?? '' ) === 'completed' ) {
+            return;
+        }
 
         Mighty_Backup_Log_Stream::add( 'Running retention cleanup...' );
 
@@ -887,8 +952,20 @@ class Mighty_Backup_Manager {
 
     /**
      * Handle a step failure.
+     *
+     * Race-check: if cancel() has set status='cancelling' (the tombstone)
+     * while this step was running, skip the re-save. cancel() owns the
+     * STATE_OPTION lifecycle from that point onward — re-saving 'failed'
+     * here would resurrect the row cancel just nuked.
      */
     private function fail( array $state, string $error ): void {
+        $fresh = $this->get_state();
+        if ( is_array( $fresh ) && ( $fresh['status'] ?? '' ) === 'cancelling' ) {
+            Mighty_Backup_Log_Stream::add( 'Step aborted by cancel: ' . $error );
+            Mighty_Backup_Log_Stream::flush();
+            return;
+        }
+
         $state['status'] = 'failed';
         $state['error']  = $error;
         $this->save_state( $state );
@@ -944,11 +1021,22 @@ class Mighty_Backup_Manager {
     }
 
     /**
-     * Check if a backup is currently running.
+     * Check if a backup is currently running. Returns true for both 'pending'
+     * (queued but step_start hasn't flipped to 'running' yet) and 'running'
+     * proper, AND for the transient 'cancelling' tombstone — anything else
+     * (idle, completed, failed) means a new backup is safe to schedule.
+     *
+     * Including 'pending' closes the multi-second window between schedule()'s
+     * save_state and step_start's status='running' flip during which a second
+     * scheduler call could pass the gate and stomp the in-flight state.
      */
     public function is_running(): bool {
         $state = $this->get_state();
-        return $state && $state['status'] === 'running';
+        return is_array( $state ) && in_array(
+            $state['status'] ?? '',
+            [ 'pending', 'running', 'cancelling' ],
+            true
+        );
     }
 
     /**
@@ -1088,6 +1176,14 @@ class Mighty_Backup_Manager {
         if ( ! $state || ! in_array( $state['status'], [ 'pending', 'running' ], true ) ) {
             return false;
         }
+
+        // Tombstone: write status='cancelling' BEFORE unscheduling so a
+        // mid-flight step's catch -> fail() can detect the cancel via
+        // get_state() and skip the re-save that would otherwise resurrect
+        // STATE_OPTION as 'failed' just after cancel deletes it.
+        $state['status']       = 'cancelling';
+        $state['cancelled_at'] = time();
+        $this->save_state( $state );
 
         // Unschedule any queued backup step actions.
         foreach ( self::STEPS as $step ) {

@@ -240,6 +240,77 @@ class BackupManagerTest extends TestCase {
         $this->assertLessThan( 33, $status['progress'] );
     }
 
+    // ──────────────────────────────────────────────
+    //  State-machine race cluster (PR2)
+    // ──────────────────────────────────────────────
+
+    public function test_is_running_returns_true_for_pending_status(): void {
+        // Closes the multi-second window between schedule() saving 'pending'
+        // and step_start flipping to 'running' during which a concurrent
+        // schedule() call could pass the gate and stomp the in-flight state.
+        Functions\when( 'get_site_option' )->justReturn( [ 'status' => 'pending' ] );
+        $manager = new Mighty_Backup_Manager();
+        $this->assertTrue( $manager->is_running() );
+    }
+
+    public function test_is_running_returns_true_during_cancelling_tombstone(): void {
+        // While cancel() is cleaning up, schedule() must still see the run
+        // as active so it doesn't race in and resurrect STATE_OPTION.
+        Functions\when( 'get_site_option' )->justReturn( [ 'status' => 'cancelling' ] );
+        $manager = new Mighty_Backup_Manager();
+        $this->assertTrue( $manager->is_running() );
+    }
+
+    public function test_is_running_returns_false_for_completed_failed_and_idle(): void {
+        foreach ( [ 'completed', 'failed' ] as $status ) {
+            Functions\when( 'get_site_option' )->justReturn( [ 'status' => $status ] );
+            $manager = new Mighty_Backup_Manager();
+            $this->assertFalse( $manager->is_running(), "status={$status} should not count as running" );
+        }
+        // No state at all.
+        Functions\when( 'get_site_option' )->justReturn( null );
+        $manager = new Mighty_Backup_Manager();
+        $this->assertFalse( $manager->is_running() );
+    }
+
+    public function test_fail_skips_re_save_when_cancel_tombstone_is_set(): void {
+        // The race: cancel() writes status='cancelling' and starts cleanup;
+        // an in-flight step's catch -> fail() reads the tombstoned state and
+        // returns early instead of re-saving 'failed' (which would resurrect
+        // STATE_OPTION after cancel just deleted it).
+        Functions\when( 'get_site_option' )->justReturn( [
+            'status'           => 'cancelling',
+            'cancelled_at'     => 1700000000,
+            'log_id'           => null,
+            'db_local_path'    => null,
+            'files_local_path' => null,
+            'timestamp'        => '2026-06-17-123000',
+        ] );
+        $save_calls = 0;
+        Functions\when( 'update_site_option' )->alias( function () use ( &$save_calls ) {
+            $save_calls++;
+            return true;
+        } );
+
+        $manager = new Mighty_Backup_Manager();
+        $ref     = new \ReflectionMethod( $manager, 'fail' );
+        $ref->setAccessible( true );
+
+        // Stale local state (the step handler's view before cancel ran).
+        $local_state = [
+            'status'           => 'running',
+            'log_id'           => null,
+            'db_local_path'    => null,
+            'files_local_path' => null,
+            'timestamp'        => '2026-06-17-123000',
+        ];
+        $ref->invokeArgs( $manager, [ $local_state, 'pretend error from a yanked-file mid-archive' ] );
+
+        // Must NOT have called save_state (status=failed re-save would
+        // overwrite the tombstone).
+        $this->assertSame( 0, $save_calls, 'fail() must not save_state when cancel tombstone is set' );
+    }
+
     public function test_get_status_does_not_fatal_on_malformed_db_export_state(): void {
         // Defensive: if db_export is in the chunked shape but big_tables is
         // somehow missing (older state version, hand-edited option, race),
