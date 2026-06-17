@@ -129,6 +129,22 @@ function mighty_backup_activate( $network_wide ) {
     }
 
     Mighty_Backup_Dev_Mode::maybe_set_live_url();
+
+    // Install (or refresh) the bucket lifecycle rule that aborts incomplete
+    // multipart uploads after 1 day. Belt-and-suspenders backstop for the
+    // explicit abort_upload_state call inside Spaces_Client::upload — if a
+    // worker SIGKILL skips that abort, Spaces will still reclaim the orphans.
+    // Best-effort: only runs when settings are populated (creds known).
+    try {
+        $settings = new Mighty_Backup_Settings();
+        if ( $settings->is_configured() && mighty_backup_has_sdk() ) {
+            ( new Mighty_Backup_Spaces_Client( $settings ) )->ensure_lifecycle_policy();
+        }
+    } catch ( \Throwable $e ) {
+        // Activation must not fail. Operator can re-run via the settings
+        // page or `wp mighty-backup` once creds are in place.
+        error_log( 'Mighty Backup activation: ensure_lifecycle_policy skipped — ' . $e->getMessage() );
+    }
 }
 register_activation_hook( __FILE__, 'mighty_backup_activate' );
 

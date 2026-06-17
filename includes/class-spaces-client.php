@@ -133,6 +133,12 @@ class Mighty_Backup_Spaces_Client {
             } catch ( MultipartUploadException $e ) {
                 if ( $attempt >= $max_retries ) {
                     Mighty_Backup_Log_Stream::clear_progress();
+                    // Best-effort abort so the parts already uploaded don't
+                    // sit on Spaces forever consuming storage. The bucket's
+                    // AbortIncompleteMultipartUpload lifecycle rule (Days: 1)
+                    // and the daily sweep_orphan_multiparts cron are the
+                    // belt-and-suspenders backstops if this fails.
+                    $this->abort_upload_state( $e );
                     throw new \Exception(
                         sprintf( 'Upload failed after %d attempts: %s', $max_retries, $e->getMessage() )
                     );
@@ -144,11 +150,144 @@ class Mighty_Backup_Spaces_Client {
                     'state'         => $e->getState(),
                     'before_upload' => $progress_callback,
                 ] );
+            } catch ( \Throwable $other ) {
+                // Non-multipart errors (e.g. AwsException from a single PutObject
+                // fast-path for small files, or network errors raised outside
+                // the SDK retry layer). No multipart state to abort, but
+                // still need to clear the progress indicator.
+                Mighty_Backup_Log_Stream::clear_progress();
+                throw $other;
             }
         } while ( $attempt < $max_retries );
 
         Mighty_Backup_Log_Stream::clear_progress();
         return $full_key;
+    }
+
+    /**
+     * Best-effort abort of a multipart upload whose state we hold via a
+     * MultipartUploadException. The state exposes Bucket / Key / UploadId
+     * via getId(). Failures here are non-fatal — the bucket lifecycle rule
+     * installed at activation will eventually clean up if this miss.
+     */
+    private function abort_upload_state( MultipartUploadException $e ): void {
+        try {
+            $id = $e->getState()->getId();
+            if ( empty( $id['UploadId'] ) || empty( $id['Bucket'] ) || empty( $id['Key'] ) ) {
+                return;
+            }
+            $this->client->abortMultipartUpload( [
+                'Bucket'   => $id['Bucket'],
+                'Key'      => $id['Key'],
+                'UploadId' => $id['UploadId'],
+            ] );
+            Mighty_Backup_Log_Stream::add( sprintf(
+                'Aborted incomplete multipart upload %s (UploadId %s)',
+                $id['Key'],
+                substr( (string) $id['UploadId'], 0, 12 ) . '…'
+            ) );
+        } catch ( \Throwable $abort_err ) {
+            error_log( 'Mighty Backup: abortMultipartUpload failed — ' . $abort_err->getMessage() );
+        }
+    }
+
+    /**
+     * Idempotently install a bucket lifecycle rule that aborts incomplete
+     * multipart uploads after 1 day. Defense-in-depth: even if our explicit
+     * abort_upload_state misses (worker SIGKILL between attempt-fail and
+     * abort), Spaces will eventually reclaim the orphan storage.
+     *
+     * The rule scopes to our `client_path/` prefix so a shared bucket
+     * isn't affected. Existing rules on the bucket are preserved; we only
+     * replace any prior version of our own rule (matched by ID).
+     *
+     * Best-effort: a failure (credentials lacking PutBucketLifecycleConfiguration,
+     * bucket not supporting lifecycle) is logged but doesn't throw — the
+     * sweep_orphan_multiparts daily cron is the second backstop.
+     */
+    public function ensure_lifecycle_policy(): void {
+        $rule_id = 'mighty-backup-abort-incomplete-multiparts';
+
+        try {
+            $rules = [];
+            try {
+                $current = $this->client->getBucketLifecycleConfiguration( [ 'Bucket' => $this->bucket ] );
+                $rules   = $current['Rules'] ?? [];
+            } catch ( AwsException $e ) {
+                // NoSuchLifecycleConfiguration is expected on a fresh bucket;
+                // start with an empty rule set. Re-throw anything else.
+                if ( $e->getAwsErrorCode() !== 'NoSuchLifecycleConfiguration' ) {
+                    throw $e;
+                }
+            }
+
+            // Remove any prior version of our rule (idempotency).
+            $rules = array_values( array_filter( $rules, static function ( $r ) use ( $rule_id ) {
+                return ( $r['ID'] ?? '' ) !== $rule_id;
+            } ) );
+
+            $rules[] = [
+                'ID'                              => $rule_id,
+                'Status'                          => 'Enabled',
+                'Filter'                          => [ 'Prefix' => $this->client_path . '/' ],
+                'AbortIncompleteMultipartUpload'  => [ 'DaysAfterInitiation' => 1 ],
+            ];
+
+            $this->client->putBucketLifecycleConfiguration( [
+                'Bucket'                 => $this->bucket,
+                'LifecycleConfiguration' => [ 'Rules' => $rules ],
+            ] );
+        } catch ( \Throwable $e ) {
+            error_log( 'Mighty Backup: ensure_lifecycle_policy failed — ' . $e->getMessage() );
+        }
+    }
+
+    /**
+     * Find and abort multipart uploads older than $max_age_hours under our
+     * client_path prefix. Called from the daily retention cron as a backstop
+     * for failures of both per-upload abort and the bucket lifecycle rule.
+     *
+     * @return array{aborted:int, errors:string[]} aborted = abort count.
+     */
+    public function sweep_orphan_multiparts( int $max_age_hours = 24 ): array {
+        $cutoff  = time() - max( 1, $max_age_hours ) * 3600;
+        $aborted = 0;
+        $errors  = [];
+
+        try {
+            $paginator = $this->client->getPaginator( 'ListMultipartUploads', [
+                'Bucket' => $this->bucket,
+                'Prefix' => $this->client_path . '/',
+            ] );
+
+            foreach ( $paginator as $page ) {
+                foreach ( $page['Uploads'] ?? [] as $upload ) {
+                    $initiated = $upload['Initiated'] ?? null;
+                    if ( $initiated instanceof \DateTimeInterface ) {
+                        $ts = $initiated->getTimestamp();
+                    } else {
+                        $ts = is_string( $initiated ) ? strtotime( $initiated ) : false;
+                    }
+                    if ( $ts === false || $ts > $cutoff ) {
+                        continue;
+                    }
+                    try {
+                        $this->client->abortMultipartUpload( [
+                            'Bucket'   => $this->bucket,
+                            'Key'      => $upload['Key'],
+                            'UploadId' => $upload['UploadId'],
+                        ] );
+                        $aborted++;
+                    } catch ( \Throwable $err ) {
+                        $errors[] = ( $upload['Key'] ?? '?' ) . ': ' . $err->getMessage();
+                    }
+                }
+            }
+        } catch ( \Throwable $e ) {
+            $errors[] = 'ListMultipartUploads: ' . $e->getMessage();
+        }
+
+        return [ 'aborted' => $aborted, 'errors' => $errors ];
     }
 
     /**

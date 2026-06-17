@@ -184,6 +184,23 @@ class Mighty_Backup_Scheduler {
                 $result['files_deleted'],
                 $retention_count
             ) );
+
+            // Sweep multipart uploads older than 24h whose abort got missed
+            // (worker SIGKILL during upload, lifecycle rule absent or stale).
+            // Each one is otherwise charged for storage indefinitely.
+            $swept = $client->sweep_orphan_multiparts( 24 );
+            $result['multiparts_aborted'] = (int) ( $swept['aborted'] ?? 0 );
+            if ( ! empty( $swept['aborted'] ) ) {
+                Mighty_Backup_Log_Stream::add( sprintf(
+                    'Retention cron aborted %d orphan multipart upload(s).',
+                    $swept['aborted']
+                ) );
+            }
+            if ( ! empty( $swept['errors'] ) ) {
+                foreach ( $swept['errors'] as $err ) {
+                    Mighty_Backup_Log_Stream::add( 'Multipart sweep warning: ' . $err );
+                }
+            }
         } catch ( \Throwable $e ) {
             $result['error'] = $e->getMessage();
             Mighty_Backup_Log_Stream::add( 'Retention cron failed: ' . $e->getMessage() );
