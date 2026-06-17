@@ -19,6 +19,27 @@ class Mighty_Backup_Scheduler {
     public function init(): void {
         add_action( self::CRON_HOOK, [ $this, 'run_scheduled_backup' ] );
         add_action( self::RETENTION_CRON_HOOK, [ $this, 'run_retention' ] );
+        // WordPress core ships 'hourly', 'twicedaily', 'daily' only; without
+        // this filter wp_schedule_event('weekly', ...) silently returns false
+        // and the operator gets zero backups despite selecting Weekly.
+        add_filter( 'cron_schedules', [ $this, 'register_weekly_recurrence' ] );
+    }
+
+    /**
+     * Register the 'weekly' cron recurrence. WordPress core has no built-in
+     * weekly schedule. Reuses WEEK_IN_SECONDS (604,800) to stay consistent
+     * with core's interval naming.
+     *
+     * @param array $schedules Existing wp-cron schedules keyed by name.
+     */
+    public function register_weekly_recurrence( array $schedules ): array {
+        if ( ! isset( $schedules['weekly'] ) ) {
+            $schedules['weekly'] = [
+                'interval' => WEEK_IN_SECONDS,
+                'display'  => __( 'Once Weekly', 'mighty-backup' ),
+            ];
+        }
+        return $schedules;
     }
 
     /**
@@ -33,8 +54,9 @@ class Mighty_Backup_Scheduler {
                 $settings  = new Mighty_Backup_Settings();
                 $frequency = $settings->get( 'schedule_frequency', 'daily' );
                 $time      = $settings->get( 'schedule_time', '03:00' );
+                $day       = $settings->get( 'schedule_day', 'monday' );
 
-                $next_run = $this->calculate_next_run( $time );
+                $next_run = $this->calculate_next_run( $time, $frequency, $day );
 
                 wp_schedule_event( $next_run, $frequency, self::CRON_HOOK );
             }
@@ -43,7 +65,7 @@ class Mighty_Backup_Scheduler {
             // streak of failed backups doesn't let old objects accumulate on
             // Spaces. Fires a few hours after the typical backup window.
             if ( ! wp_next_scheduled( self::RETENTION_CRON_HOOK ) ) {
-                $retention_next = strtotime( 'tomorrow 06:00', current_time( 'timestamp' ) );
+                $retention_next = $this->next_time_in_wp_tz( 6, 0 );
                 wp_schedule_event( $retention_next, 'daily', self::RETENTION_CRON_HOOK );
             }
         } finally {
@@ -184,25 +206,76 @@ class Mighty_Backup_Scheduler {
     }
 
     /**
-     * Calculate the next run timestamp based on the configured time.
+     * Calculate the next run timestamp based on the configured time and
+     * recurrence. For 'weekly', honors schedule_day (a weekday name); for
+     * 'daily'/'twicedaily', just picks today or tomorrow at HH:MM.
      *
-     * @param string $time Time in HH:MM format.
-     * @return int Unix timestamp.
+     * Uses wp_timezone() and DateTimeImmutable to handle DST correctly —
+     * the previous current_time('timestamp') + strtotime() combination
+     * was deprecated since WP 5.3 and could shift by an hour twice a year.
+     *
+     * @param string $time      HH:MM in the site's configured timezone.
+     * @param string $frequency 'hourly' | 'twicedaily' | 'daily' | 'weekly'.
+     * @param string $day       Weekday name for 'weekly' ('monday'..'sunday').
+     * @return int UTC Unix timestamp.
      */
-    private function calculate_next_run( string $time ): int {
+    private function calculate_next_run( string $time, string $frequency = 'daily', string $day = 'monday' ): int {
         $parts = explode( ':', $time );
-        $hour  = (int) ( $parts[0] ?? 3 );
-        $min   = (int) ( $parts[1] ?? 0 );
+        $hour  = max( 0, min( 23, (int) ( $parts[0] ?? 3 ) ) );
+        $min   = max( 0, min( 59, (int) ( $parts[1] ?? 0 ) ) );
 
-        // Use WordPress timezone (Settings > General).
-        $now  = current_time( 'timestamp' );
-        $today = strtotime( "today {$hour}:{$min}", $now );
-
-        // If the time has already passed today, schedule for tomorrow.
-        if ( $today <= $now ) {
-            return strtotime( 'tomorrow ' . sprintf( '%02d:%02d', $hour, $min ), $now );
+        if ( $frequency === 'weekly' ) {
+            return $this->next_weekday_in_wp_tz( $day, $hour, $min );
         }
 
-        return $today;
+        return $this->next_time_in_wp_tz( $hour, $min );
+    }
+
+    /**
+     * Return the next future UTC timestamp at HH:MM in the WP timezone.
+     * If HH:MM hasn't passed today, returns today; otherwise tomorrow.
+     */
+    private function next_time_in_wp_tz( int $hour, int $min ): int {
+        $tz   = wp_timezone();
+        $now  = new \DateTimeImmutable( 'now', $tz );
+        $next = $now->setTime( $hour, $min, 0 );
+        if ( $next <= $now ) {
+            $next = $next->modify( '+1 day' );
+        }
+        return $next->getTimestamp();
+    }
+
+    /**
+     * Return the next future UTC timestamp at HH:MM on the named weekday in
+     * the WP timezone. Used by the 'weekly' recurrence so schedule_day is
+     * actually honored (it was previously stored but silently dropped).
+     *
+     * @param string $day_name 'monday'..'sunday' (case-insensitive).
+     */
+    private function next_weekday_in_wp_tz( string $day_name, int $hour, int $min ): int {
+        static $map = [
+            'sunday'    => 0,
+            'monday'    => 1,
+            'tuesday'   => 2,
+            'wednesday' => 3,
+            'thursday'  => 4,
+            'friday'    => 5,
+            'saturday'  => 6,
+        ];
+        $target = $map[ strtolower( $day_name ) ] ?? 1; // default Monday
+
+        $tz   = wp_timezone();
+        $now  = new \DateTimeImmutable( 'now', $tz );
+        $current_dow = (int) $now->format( 'w' );        // 0=Sun..6=Sat
+        $days_ahead  = ( $target - $current_dow + 7 ) % 7;
+
+        $next = $now->setTime( $hour, $min, 0 );
+        if ( $days_ahead > 0 ) {
+            $next = $next->modify( "+{$days_ahead} days" );
+        } elseif ( $next <= $now ) {
+            // Today is the target day but HH:MM has passed — go next week.
+            $next = $next->modify( '+7 days' );
+        }
+        return $next->getTimestamp();
     }
 }
