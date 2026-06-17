@@ -1275,9 +1275,25 @@ class Mighty_Backup_Manager {
 
     /**
      * Save the backup state.
+     *
+     * On single-site WP, prefer autoload=no via add_option on first write so
+     * the (sometimes 50–100KB) serialized state with table_sizes etc. isn't
+     * loaded on every wp-admin page hit. Subsequent writes use update_option,
+     * which preserves the existing autoload flag. add_site_option / multisite
+     * use wp_sitemeta which has no autoload concept — no special handling
+     * needed there.
      */
     private function save_state( array $state ): void {
-        update_site_option( self::STATE_OPTION, $state );
+        if ( is_multisite() ) {
+            update_site_option( self::STATE_OPTION, $state );
+            return;
+        }
+        // Single-site: avoid autoload bloat.
+        if ( get_option( self::STATE_OPTION, null ) === null ) {
+            add_option( self::STATE_OPTION, $state, '', 'no' );
+        } else {
+            update_option( self::STATE_OPTION, $state );
+        }
     }
 
     /**

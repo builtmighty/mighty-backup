@@ -242,6 +242,32 @@ class Mighty_Backup_Logger {
     }
 
     /**
+     * Bounded prune of old history rows. Keeps anything still running plus
+     * anything started within $days ago; deletes the rest. Called from the
+     * daily retention cron so the history table doesn't grow unbounded on
+     * long-running installs (a busy site accumulates ~365 rows/year).
+     *
+     * @param int $days Rows older than this are eligible for deletion. 0 disables.
+     * @return int Rows actually deleted.
+     */
+    public function prune_history( int $days ): int {
+        if ( $days < 1 ) {
+            return 0;
+        }
+        global $wpdb;
+        $table  = $this->get_table_name();
+        $cutoff = gmdate( 'Y-m-d H:i:s', time() - ( $days * 86400 ) );
+
+        // Belt-and-suspenders: never reap a row that's still flagged 'running'.
+        return (int) $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$table} WHERE status != 'running' AND started_at < %s",
+                $cutoff
+            )
+        );
+    }
+
+    /**
      * Delete entries by primary key.
      *
      * @param int[] $ids

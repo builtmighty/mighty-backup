@@ -201,6 +201,36 @@ class Mighty_Backup_Scheduler {
                     Mighty_Backup_Log_Stream::add( 'Multipart sweep warning: ' . $err );
                 }
             }
+
+            // Prune the local history table so it doesn't grow unbounded
+            // (a busy install accumulates ~365 rows/year). Default 90 days,
+            // filterable via mighty_backup_history_retention_days.
+            $history_days = (int) apply_filters( 'mighty_backup_history_retention_days', 90 );
+            $logger       = new Mighty_Backup_Logger();
+            $pruned_rows  = $logger->prune_history( $history_days );
+            $result['history_pruned'] = $pruned_rows;
+            if ( $pruned_rows > 0 ) {
+                Mighty_Backup_Log_Stream::add( sprintf(
+                    'Retention cron pruned %d history row(s) older than %d days.',
+                    $pruned_rows,
+                    $history_days
+                ) );
+            }
+
+            // Stale completed-state sweep. After a successful backup,
+            // STATE_OPTION lingers as 'completed' until the next schedule()
+            // call clears it (so the admin UI can show the post-run report).
+            // If the operator never triggers another backup, it sits forever.
+            // 72h sweep is a reasonable upper bound on "user has seen the
+            // post-run report" without trampling a still-relevant report.
+            $current_state = get_site_option( 'bm_backup_current_state' );
+            if ( is_array( $current_state ) && ( $current_state['status'] ?? '' ) === 'completed' ) {
+                $started_ts = isset( $current_state['started_at'] ) ? strtotime( (string) $current_state['started_at'] ) : false;
+                if ( $started_ts !== false && ( time() - $started_ts ) > ( 72 * 3600 ) ) {
+                    delete_site_option( 'bm_backup_current_state' );
+                    Mighty_Backup_Log_Stream::add( 'Retention cron cleared stale completed STATE_OPTION (>72h).' );
+                }
+            }
         } catch ( \Throwable $e ) {
             $result['error'] = $e->getMessage();
             Mighty_Backup_Log_Stream::add( 'Retention cron failed: ' . $e->getMessage() );
