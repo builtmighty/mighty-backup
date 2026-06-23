@@ -27,6 +27,12 @@ class Mighty_Backup_Spaces_Client {
             'region'                  => 'us-east-1',
             'endpoint'                => 'https://' . $settings->get( 'spaces_endpoint' ),
             'use_path_style_endpoint' => false,
+            // Credentials, region, and endpoint are all supplied explicitly below, so the
+            // SDK never needs the shared AWS config/credentials files. Disabling the lookup
+            // prevents the SDK from probing "$HOME/.aws/config", which triggers an
+            // open_basedir warning on hosts (e.g. Sevalla) where HOME is outside the
+            // allowed paths. See VAL-892.
+            'use_aws_shared_config_files' => false,
             'credentials'             => [
                 'key'    => $settings->get( 'spaces_access_key' ),
                 'secret' => $settings->get_secret_key(),

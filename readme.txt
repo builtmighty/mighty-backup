@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 2.14.0
+Stable tag: 2.14.1
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,9 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 2.14.1 =
+* Fixed an `open_basedir` warning emitted by the bundled AWS SDK on every S3/Spaces client construction (twice per Action Scheduler queue run on affected hosts). The SDK's shared-config resolver probed `$HOME/.aws/config`, which on hosts like Sevalla resolves to a path outside the `open_basedir` allow-list (e.g. `/www/<site>/.aws/config`), tripping `is_readable()`. `Mighty_Backup_Spaces_Client` already passes credentials, region, and endpoint explicitly, so the shared config/credentials files were never needed; the client now sets `use_aws_shared_config_files => false`, which stops the probe entirely. No credential or behavior change — uploads, listing, and signing are unaffected. (VAL-892)
 
 = 2.14.0 =
 **Bundled audit fixes — six independent PRs landing in one release. Focused entirely on the Codespace-producer scope; no new operational surface.**
