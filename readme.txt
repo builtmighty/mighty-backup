@@ -4,7 +4,7 @@ Donate link: https://builtmighty.com
 Tags: digital ocean, spaces, backups
 Requires at least: 6.0
 Tested up to: 6.7
-Stable tag: 3.0.0
+Stable tag: 3.0.1
 Requires PHP: 8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -20,6 +20,13 @@ Automated site backups to DigitalOcean Spaces. Creates nightly and on-demand bac
 == Screenshots ==
 
 == Changelog ==
+
+= 3.0.1 =
+**Fixes the devcontainer update failing on any real WordPress repo.**
+
+* **Only `.devcontainer/` is listed now, not the whole repository.** 3.0.0 fetched the target repo's entire file tree in one recursive call to work out what to delete. GitHub caps that response at 100,000 entries / ~7 MB and flags it `truncated` — which any real WordPress repo (core, every plugin, every theme, vendor trees) exceeds, so the update aborted with "GitHub truncated the file listing for the repository." The listing now walks the root tree to the `.devcontainer` entry and recurses only into that, which stays at ~45 entries no matter how large the repo is. Costs one extra request per repo; the truncation guard stays in place as a backstop. The same fix applies to the template listing.
+* **Refuses to commit a deletion-only tree.** As a safety net for the class of bug above, the update now asserts that the replacement adds at least one file before it creates the commit. If the template listing ever comes back empty or with unexpected paths, the run stops instead of opening a PR that deletes `.devcontainer/` and puts nothing back.
+* Four more tests covering the subtree path handling — a wrong prefix there is silent and would produce exactly that deletion-only PR.
 
 = 3.0.0 =
 **The devcontainer is now owned end-to-end by the template. `.devcontainer/` is replaced wholesale on every update, not merged into.**

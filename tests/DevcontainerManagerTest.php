@@ -208,6 +208,69 @@ class DevcontainerManagerTest extends TestCase {
     }
 
     /* ---------------------------------------------------------------------
+     * prefix_subtree_entries()
+     *
+     * A subtree listing returns paths relative to the subtree. If they aren't
+     * put back under `.devcontainer/`, every downstream prefix filter drops
+     * them — the adds silently vanish and only the deletes survive.
+     * ------------------------------------------------------------------ */
+
+    public function test_subtree_paths_are_prefixed_back_to_repo_root(): void {
+        $subtree = [
+            [ 'path' => 'devcontainer.json', 'mode' => '100644', 'type' => 'blob', 'sha' => 'a' ],
+            [ 'path' => 'bin',               'mode' => '040000', 'type' => 'tree', 'sha' => 'b' ],
+            [ 'path' => 'bin/bm-up',         'mode' => '100755', 'type' => 'blob', 'sha' => 'c' ],
+        ];
+
+        $prefixed = Mighty_Devcontainer_Manager::prefix_subtree_entries( $subtree );
+
+        $this->assertSame(
+            [ '.devcontainer/devcontainer.json', '.devcontainer/bin', '.devcontainer/bin/bm-up' ],
+            array_column( $prefixed, 'path' )
+        );
+        // Mode and sha ride along untouched.
+        $this->assertSame( '100755', $prefixed[2]['mode'] );
+        $this->assertSame( 'c', $prefixed[2]['sha'] );
+        $this->assertSame( 'tree', $prefixed[1]['type'] );
+    }
+
+    public function test_prefixed_entries_survive_the_tree_builder(): void {
+        // The end-to-end shape: a subtree response goes through prefixing and
+        // must still be recognised as template files by the builder.
+        $template = Mighty_Devcontainer_Manager::prefix_subtree_entries( [
+            [ 'path' => 'devcontainer.json', 'mode' => '100644', 'type' => 'blob', 'sha' => 't1' ],
+            [ 'path' => 'bin/bm-up',         'mode' => '100755', 'type' => 'blob', 'sha' => 't2' ],
+        ] );
+
+        $items = Mighty_Devcontainer_Manager::build_devcontainer_tree_items(
+            [],
+            $template,
+            [ '.devcontainer/devcontainer.json' => 'n1', '.devcontainer/bin/bm-up' => 'n2' ]
+        );
+
+        $this->assertCount( 2, $items, 'prefixed template entries must reach the add list' );
+        foreach ( $items as $item ) {
+            $this->assertNotNull( $item['sha'] );
+        }
+    }
+
+    public function test_prefixing_skips_entries_with_no_path(): void {
+        $prefixed = Mighty_Devcontainer_Manager::prefix_subtree_entries( [
+            [ 'mode' => '100644', 'type' => 'blob', 'sha' => 'a' ],
+            [ 'path' => '', 'mode' => '100644', 'type' => 'blob', 'sha' => 'b' ],
+            [ 'path' => 'ok.txt', 'mode' => '100644', 'type' => 'blob', 'sha' => 'c' ],
+        ] );
+
+        // A bare '.devcontainer/' entry would be meaningless and confuse the
+        // prefix filters.
+        $this->assertSame( [ '.devcontainer/ok.txt' ], array_column( $prefixed, 'path' ) );
+    }
+
+    public function test_prefixing_an_empty_subtree_yields_nothing(): void {
+        $this->assertSame( [], Mighty_Devcontainer_Manager::prefix_subtree_entries( [] ) );
+    }
+
+    /* ---------------------------------------------------------------------
      * removed_devcontainer_paths()
      * ------------------------------------------------------------------ */
 
