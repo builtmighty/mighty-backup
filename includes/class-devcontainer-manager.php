@@ -392,20 +392,18 @@ class Mighty_Devcontainer_Manager {
 			);
 		}
 
-		// 4. Get the repo's current tree (recursive).
-		$repo_tree_data = $this->api_get(
-			self::API_BASE . '/repos/' . $owner . '/' . $repo . '/git/trees/' . $head_sha . '?recursive=1'
-		);
-		$repo_tree = $repo_tree_data['tree'];
-		$this->assert_tree_complete( $repo_tree_data, 'the repository' );
+		// 4. List the repo's existing .devcontainer/ contents.
+		$repo_subtree  = $this->fetch_devcontainer_subtree( $owner, $repo, $head_sha, 'the repository' );
+		$repo_root_sha = $repo_subtree['root_sha'];
+		$repo_tree     = $repo_subtree['entries'];
 
-		// 5. Get the global template tree (recursive).
-		$global_tree_data = $this->api_get(
-			self::API_BASE . '/repos/' . self::GLOBAL_OWNER . '/' . self::GLOBAL_REPO
-				. '/git/trees/' . self::GLOBAL_REF . '?recursive=1'
-		);
-		$global_tree = $global_tree_data['tree'];
-		$this->assert_tree_complete( $global_tree_data, 'the devcontainer template' );
+		// 5. List the template's .devcontainer/ contents.
+		$global_tree = $this->fetch_devcontainer_subtree(
+			self::GLOBAL_OWNER,
+			self::GLOBAL_REPO,
+			self::GLOBAL_REF,
+			'the devcontainer template'
+		)['entries'];
 
 		// 6. Calculate site disk size and determine Codespace tier.
 		$disk_size = $this->calculate_site_disk_size();
@@ -458,10 +456,21 @@ class Mighty_Devcontainer_Manager {
 		$removed_paths = self::removed_devcontainer_paths( $repo_tree, $global_tree );
 		$tree_items    = self::build_devcontainer_tree_items( $repo_tree, $global_tree, $blob_shas );
 
+		// Invariant: a wholesale replacement always adds files. If the add list
+		// is empty we'd be committing deletions only — wiping .devcontainer/ and
+		// putting nothing back. That can only mean the template listing came
+		// back empty or mis-prefixed, so refuse rather than open that PR.
+		$additions = array_filter( $tree_items, static fn( $item ) => $item['sha'] !== null );
+		if ( ! $additions ) {
+			throw new \RuntimeException(
+				'Refusing to update: no template files were resolved, so the PR would delete .devcontainer without replacing it.'
+			);
+		}
+
 		$new_tree = $this->api_post(
 			self::API_BASE . '/repos/' . $owner . '/' . $repo . '/git/trees',
 			[
-				'base_tree' => $repo_tree_data['sha'],
+				'base_tree' => $repo_root_sha,
 				'tree'      => $tree_items,
 			]
 		);
@@ -876,6 +885,107 @@ class Mighty_Devcontainer_Manager {
 		}
 
 		return ! empty( $ref['ref'] );
+	}
+
+	/**
+	 * List a repo's `.devcontainer/` contents, without reading the rest of it.
+	 *
+	 * A recursive tree of the whole repository is the obvious way to do this and
+	 * the wrong one: GitHub caps `?recursive=1` at 100,000 entries / ~7 MB and
+	 * flags the response `truncated`, which a real WordPress repo — core, every
+	 * plugin, every theme, vendor trees — blows straight past. Walking down to
+	 * the `.devcontainer` subtree first keeps the recursive call at ~45 entries
+	 * no matter how large the repo is, and costs one extra request.
+	 *
+	 * Returned paths are re-prefixed with `.devcontainer/` — a subtree listing
+	 * gives paths relative to that subtree (`bin/bm`, not `.devcontainer/bin/bm`).
+	 *
+	 * @param string $owner    Repo owner.
+	 * @param string $repo     Repo name.
+	 * @param string $tree_ish Commit SHA or branch name to read the tree at.
+	 * @param string $label    Human name for the source, used in error messages.
+	 * @return array{root_sha:string, entries:array} Root tree SHA (for `base_tree`)
+	 *                                               and the prefixed blob entries.
+	 */
+	private function fetch_devcontainer_subtree( string $owner, string $repo, string $tree_ish, string $label ): array {
+		// Top level only — a handful of entries even for a huge repo.
+		$root = $this->api_get(
+			self::API_BASE . '/repos/' . $owner . '/' . $repo . '/git/trees/' . rawurlencode( $tree_ish )
+		);
+		$this->assert_tree_complete( $root, $label );
+
+		$dir_name  = rtrim( self::DEVCONTAINER_PREFIX, '/' );
+		$root_sha  = (string) ( $root['sha'] ?? '' );
+		$container = null;
+
+		foreach ( $root['tree'] ?? [] as $entry ) {
+			if ( ( $entry['path'] ?? '' ) === $dir_name ) {
+				$container = $entry;
+				break;
+			}
+		}
+
+		// No .devcontainer yet — a first install. Nothing to remove.
+		if ( $container === null ) {
+			return [ 'root_sha' => $root_sha, 'entries' => [] ];
+		}
+
+		// `.devcontainer` exists, but as a file (or a submodule) rather than a
+		// directory. Writing `.devcontainer/*` over it would be rejected by
+		// GitHub partway through, so stop here with something actionable —
+		// every path downstream is matched on the `.devcontainer/` prefix and
+		// would quietly ignore a bare `.devcontainer` entry.
+		if ( ( $container['type'] ?? '' ) !== 'tree' ) {
+			throw new \RuntimeException( sprintf(
+				'`%s` exists in %s as a %s, not a directory. Remove it before running the update.',
+				$dir_name,
+				$label,
+				$container['type'] ?? 'file'
+			) );
+		}
+
+		$subtree = $this->api_get(
+			self::API_BASE . '/repos/' . $owner . '/' . $repo
+				. '/git/trees/' . $container['sha'] . '?recursive=1'
+		);
+		$this->assert_tree_complete( $subtree, $label . ' .devcontainer directory' );
+
+		return [
+			'root_sha' => $root_sha,
+			'entries'  => self::prefix_subtree_entries( $subtree['tree'] ?? [] ),
+		];
+	}
+
+	/**
+	 * Re-prefix subtree entries back to repo-root-relative paths.
+	 *
+	 * A subtree listing returns paths relative to that subtree (`bin/bm`), but
+	 * everything downstream matches on the full `.devcontainer/bin/bm`. Getting
+	 * this wrong is silent and destructive — the tree builder filters on the
+	 * prefix, so mis-prefixed entries simply vanish from the add list while the
+	 * repo's real files still line up for deletion.
+	 *
+	 * @param array $entries Raw entries from a subtree response.
+	 * @return array Entries with repo-root-relative paths.
+	 */
+	public static function prefix_subtree_entries( array $entries ): array {
+		$prefixed = [];
+
+		foreach ( $entries as $entry ) {
+			$path = (string) ( $entry['path'] ?? '' );
+			if ( $path === '' ) {
+				continue;
+			}
+
+			$prefixed[] = [
+				'path' => self::DEVCONTAINER_PREFIX . $path,
+				'mode' => $entry['mode'] ?? '100644',
+				'type' => $entry['type'] ?? '',
+				'sha'  => $entry['sha'] ?? '',
+			];
+		}
+
+		return $prefixed;
 	}
 
 	/**
